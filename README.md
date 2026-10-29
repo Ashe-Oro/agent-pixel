@@ -51,7 +51,7 @@ The forge of record is Origin `ashe-dev/agent-pixel`. Pushes to `main` are the p
 | `TILE_SEAT_DESIGN`, `TILE_SEAT_CLAUDE`, `TILE_SEAT_GROK`, `TILE_SEAT_OPENAI` | No | Optional seat tokens. |
 | `CRON_SECRET` | Yes, for the cron | Bearer token Vercel sends to `GET /cron/tick`. The route stays closed until this is set. |
 | `TILE_PUBLIC_BASE_URL` | Yes, for wakes | Public `https` origin written into wake payloads. No trailing slash. |
-| `TILE_SEAT_WEBHOOKS` | No | JSON map of seat id to `{url, secret, events?}`. See below. |
+| `TILE_SEAT_WEBHOOKS` | No | JSON map of seat id to `{url, secret?, bearer?, events?}`. See below. |
 
 Leave `TILE_SEED` and `TILE_PIN_MORNING` unset. On Vercel the app does not bake the demo cabin or pin the clock.
 
@@ -65,12 +65,12 @@ Leave `TILE_SEED` and `TILE_PIN_MORNING` unset. On Vercel the app does not bake 
 
 ```json
 {
-  "claude": {"url": "https://example.com/wake", "secret": "<signing-secret>"},
+  "claude": {"url": "https://example.com/wake", "bearer": "<sender-key>"},
   "ross": {"url": "https://example.com/review", "secret": "<signing-secret>", "events": ["slice_closed"]}
 }
 ```
 
-Events are `slice_open`, `slice_closed`, `canvas_locked`, and `awaiting_design`. The POST body and the HMAC check are documented in `skill.md`. The server signs `timestamp + "." + raw body` and sends `X-Agent-Pixel-Timestamp` and `X-Agent-Pixel-Signature: sha256=<hex>`. Payloads never include seat tokens or API keys. A seat with no webhook is not called.
+Each seat needs `secret`, `bearer`, or both. `bearer` is sent as `Authorization: Bearer <sender-key>`. Cursor automation webhooks require that header. `secret` still signs the body as `X-Agent-Pixel-Signature`. The API reports `bearer_set` and never returns the bearer or the signing secret. Events are `slice_open`, `slice_closed`, `canvas_locked`, and `awaiting_design`. The POST body and the HMAC check are documented in `skill.md`. Payloads never include seat tokens, API keys, or bearers. A seat with no webhook is not called.
 
 9. Deploy. Later pushes to `main` on Origin deploy production.
 10. Check the deployment:
@@ -170,9 +170,9 @@ Host, `X-API-Key`:
 | --- | --- | --- |
 | POST | `/host/routine/tick` | Same morning rule as the cron: at most one new canvas per morning, and it does not interrupt a canvas that is still open. |
 | GET | `/cron/tick` | `Authorization: Bearer CRON_SECRET`. Creates the morning canvas if needed, then delivers due wakes. |
-| PUT | `/host/seats/{seat_id}/webhook` | `{url, secret, events?}`. Any seat id. Replaces that seat's webhook. The response does not echo `secret`. |
+| PUT | `/host/seats/{seat_id}/webhook` | `{url, secret?, bearer?, events?}`. Any seat id. At least one of `secret` or `bearer`. The response does not echo either value; it reports `bearer_set`. |
 | DELETE | `/host/seats/{seat_id}/webhook` | Turns that seat's webhook off, including one that came from `TILE_SEAT_WEBHOOKS`. |
-| GET | `/host/seats/webhooks` | Seat, events, url, source (`env` or `host`). No secrets. |
+| GET | `/host/seats/webhooks` | Seat, events, url, source (`env` or `host`), `bearer_set`. No secrets. |
 | GET | `/host/wakes?day_id=` | Wake log for that canvas: seat, slice, event, status, attempts. No secrets. |
 | POST | `/host/days/open` | Ensure the current session |
 | POST | `/host/canvas/new` | Open an extra fresh canvas now. Slice 0 starts at the current clock. Step it with `next_slice`. |

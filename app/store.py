@@ -334,6 +334,7 @@ class Store:
             """
         )
         self.conn.executescript(WAKE_DDL)
+        self._ensure_webhook_columns()
         row = self.conn.execute("SELECT id FROM settings WHERE id = 1").fetchone()
         if row is None:
             self.conn.execute(
@@ -361,6 +362,14 @@ class Store:
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS days_live ON days (kind, archived, ny_date, id)"
             )
+
+    def _ensure_webhook_columns(self) -> None:
+        cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(seat_webhooks)")}
+        if "bearer" not in cols:
+            self.conn.execute(
+                "ALTER TABLE seat_webhooks ADD COLUMN bearer TEXT NOT NULL DEFAULT ''"
+            )
+            self.dirty = True
 
     def _ensure_settings_columns(self) -> None:
         cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(settings)")}
@@ -1249,7 +1258,7 @@ class Store:
 
     def _post_and_finish(self, intent: WakeIntent) -> dict[str, Any]:
         try:
-            code = post_webhook(intent.url, intent.secret, intent.payload)
+            code = post_webhook(intent.url, intent.secret, intent.payload, intent.bearer)
         except Exception:
             logger.warning(
                 "wake post failed seat=%s event=%s slice=%s",
@@ -1297,7 +1306,7 @@ class Store:
     def _seat_hooks(self) -> list[SeatHook]:
         env_hooks = self._env_hooks()
         rows = self.conn.execute(
-            "SELECT seat_id, url, secret, events_json FROM seat_webhooks"
+            "SELECT seat_id, url, secret, bearer, events_json FROM seat_webhooks"
         ).fetchall()
         disabled: set[str] = set()
         stored: dict[str, SeatHook] = {}
@@ -1312,7 +1321,13 @@ class Store:
                 raise ApiError(500, "bad_webhook_config", "Stored seat webhook config is unreadable.") from exc
             if not isinstance(events, list):
                 raise ApiError(500, "bad_webhook_config", "Stored seat webhook config is unreadable.")
-            stored[seat] = SeatHook(seat, row["url"], row["secret"], frozenset(events))
+            stored[seat] = SeatHook(
+                seat,
+                row["url"],
+                row["secret"] or "",
+                frozenset(events),
+                row["bearer"] or "",
+            )
         merged = {
             seat: hook
             for seat, hook in env_hooks.items()
@@ -1330,11 +1345,12 @@ class Store:
         def mutate() -> None:
             self.conn.execute(
                 """
-                INSERT INTO seat_webhooks (seat_id, url, secret, events_json, updated_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO seat_webhooks (seat_id, url, secret, bearer, events_json, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(seat_id) DO UPDATE SET
                   url = excluded.url,
                   secret = excluded.secret,
+                  bearer = excluded.bearer,
                   events_json = excluded.events_json,
                   updated_at = excluded.updated_at
                 """,
@@ -1342,6 +1358,7 @@ class Store:
                     hook.seat_id,
                     hook.url,
                     hook.secret,
+                    hook.bearer,
                     json.dumps(sorted(hook.events)),
                     int(self.now().timestamp()),
                 ),
@@ -1356,6 +1373,7 @@ class Store:
             "source": "host",
             "events": sorted(hook.events),
             "url": hook.url,
+            "bearer_set": bool(hook.bearer),
         }
 
     def clear_seat_webhook(self, seat_id: str) -> dict[str, Any]:
@@ -1367,11 +1385,12 @@ class Store:
         def mutate() -> None:
             self.conn.execute(
                 """
-                INSERT INTO seat_webhooks (seat_id, url, secret, events_json, updated_at)
-                VALUES (?, '', '', '[]', ?)
+                INSERT INTO seat_webhooks (seat_id, url, secret, bearer, events_json, updated_at)
+                VALUES (?, '', '', '', '[]', ?)
                 ON CONFLICT(seat_id) DO UPDATE SET
                   url = '',
                   secret = '',
+                  bearer = '',
                   events_json = '[]',
                   updated_at = excluded.updated_at
                 """,
@@ -1390,7 +1409,7 @@ class Store:
             except WebhookConfigError as exc:
                 raise ApiError(500, "bad_webhook_config", exc.message) from exc
             rows = self.conn.execute(
-                "SELECT seat_id, url, events_json FROM seat_webhooks ORDER BY seat_id"
+                "SELECT seat_id, url, events_json, bearer FROM seat_webhooks ORDER BY seat_id"
             ).fetchall()
         by_seat: dict[str, dict[str, Any]] = {}
         for seat, hook in env_hooks.items():
@@ -1400,6 +1419,7 @@ class Store:
                 "source": "env",
                 "events": sorted(hook.events),
                 "url": hook.url,
+                "bearer_set": bool(hook.bearer),
             }
         for row in rows:
             seat = row["seat_id"]
@@ -1410,6 +1430,7 @@ class Store:
                     "source": "host",
                     "events": [],
                     "url": "",
+                    "bearer_set": False,
                 }
                 continue
             events = json.loads(row["events_json"])
@@ -1419,6 +1440,7 @@ class Store:
                 "source": "host",
                 "events": sorted(events) if isinstance(events, list) else [],
                 "url": row["url"],
+                "bearer_set": bool(row["bearer"]),
             }
         return {"seats": [by_seat[key] for key in sorted(by_seat)]}
 

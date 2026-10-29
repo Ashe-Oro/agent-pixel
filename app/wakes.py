@@ -33,7 +33,7 @@ MAX_POSTS_PER_DISPATCH = 8
 TIMESTAMP_HEADER = "X-Agent-Pixel-Timestamp"
 SIGNATURE_HEADER = "X-Agent-Pixel-Signature"
 _SEAT_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
-_BANNED_PAYLOAD_KEYS = ("secret", "token", "api_key", "authorization", "password")
+_BANNED_PAYLOAD_KEYS = ("secret", "token", "api_key", "authorization", "password", "bearer")
 
 WAKE_DDL = """
 CREATE TABLE IF NOT EXISTS wakes (
@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS seat_webhooks (
   url TEXT NOT NULL,
   secret TEXT NOT NULL,
   events_json TEXT NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  bearer TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -71,6 +72,7 @@ class SeatHook:
     url: str
     secret: str
     events: frozenset[str]
+    bearer: str = ""
 
 
 @dataclass
@@ -82,6 +84,7 @@ class WakeIntent:
     url: str
     secret: str
     payload: dict[str, Any]
+    bearer: str = ""
     claim: str = ""
     attempts: int = 0
 
@@ -113,9 +116,12 @@ def parse_seat_hook(seat_id: str, body: dict[str, Any]) -> SeatHook:
         raise WebhookConfigError("Webhook config must be an object.")
     seat = normalize_seat(seat_id)
     url = _validate_url(body.get("url"))
-    secret = _validate_secret(body.get("secret"))
+    secret = _optional_credential(body.get("secret"), "secret")
+    bearer = _optional_credential(body.get("bearer"), "bearer")
+    if not secret and not bearer:
+        raise WebhookConfigError("Set secret, bearer, or both.")
     events = _validate_events(body.get("events", ["slice_open"]))
-    return SeatHook(seat, url, secret, events)
+    return SeatHook(seat, url, secret, events, bearer)
 
 
 def hooks_from_env() -> dict[str, SeatHook]:
@@ -148,20 +154,23 @@ def sign_body(secret: str, timestamp: str, body: bytes) -> str:
     return hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
 
 
-def post_webhook(url: str, secret: str, payload: dict[str, Any]) -> int:
+def post_webhook(url: str, secret: str, payload: dict[str, Any], bearer: str = "") -> int:
     _reject_credential_fields(payload)
     body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
-    timestamp = str(int(time.time()))
-    signature = sign_body(secret, timestamp, body)
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "agent-pixel-wake",
+    }
+    if secret:
+        timestamp = str(int(time.time()))
+        headers[TIMESTAMP_HEADER] = timestamp
+        headers[SIGNATURE_HEADER] = f"sha256={sign_body(secret, timestamp, body)}"
+    if bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
     response = httpx.post(
         url,
         content=body,
-        headers={
-            "Content-Type": "application/json",
-            "User-Agent": "agent-pixel-wake",
-            TIMESTAMP_HEADER: timestamp,
-            SIGNATURE_HEADER: f"sha256={signature}",
-        },
+        headers=headers,
         timeout=4.0,
         follow_redirects=False,
     )
@@ -219,6 +228,7 @@ def plan_wakes(
                 url=hook.url,
                 secret=hook.secret,
                 payload=payload,
+                bearer=hook.bearer,
             )
         )
 
@@ -388,12 +398,15 @@ def _validate_url(url: object) -> str:
     return text
 
 
-def _validate_secret(secret: object) -> str:
-    if not isinstance(secret, str) or secret != secret.strip() or not secret:
-        raise WebhookConfigError("Webhook secret must be a non-empty string.")
-    if len(secret) > 256 or "\n" in secret or "\r" in secret:
-        raise WebhookConfigError("Webhook secret is too long.")
-    return secret
+def _optional_credential(value: object, label: str) -> str:
+    """Return a signing secret or bearer, or '' when the field is omitted."""
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str) or value != value.strip():
+        raise WebhookConfigError(f"Webhook {label} must be a non-empty string.")
+    if len(value) > 256 or "\n" in value or "\r" in value:
+        raise WebhookConfigError(f"Webhook {label} is too long.")
+    return value
 
 
 def _validate_events(events: object) -> frozenset[str]:
