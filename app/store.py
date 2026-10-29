@@ -10,6 +10,7 @@ metadata, and day ids never change.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -19,6 +20,22 @@ from typing import Any
 
 from app import blob_db
 from app.config import Settings
+from app.wakes import (
+    WAKE_DDL,
+    SeatHook,
+    WakeIntent,
+    WebhookConfigError,
+    claim_intents,
+    finish_wake,
+    hooks_from_env,
+    list_wake_rows,
+    needs_attempt,
+    parse_seat_hook,
+    plan_wakes,
+    post_webhook,
+    public_base_url,
+    normalize_seat,
+)
 from app.schedule import (
     ARTISTS,
     DISPLAY,
@@ -77,6 +94,7 @@ CHAT_LIST_LIMIT = 80
 from app.seed import COZY_BRIEF, COZY_PALETTE, COZY_THEME, blank_canvas, draw_cabin
 
 KNOWN_AGENTS = ("design",) + ARTISTS
+logger = logging.getLogger(__name__)
 
 
 class ApiError(Exception):
@@ -314,6 +332,7 @@ class Store:
             CREATE INDEX IF NOT EXISTS chat_day_agent ON chat (day_id, agent_id, id);
             """
         )
+        self.conn.executescript(WAKE_DDL)
         row = self.conn.execute("SELECT id FROM settings WHERE id = 1").fetchone()
         if row is None:
             self.conn.execute(
@@ -852,6 +871,7 @@ class Store:
                 raise
 
         self._run_write(mutate)
+        self._dispatch_quietly()
         order = saved["order"]
         index = saved["index"]
         return {
@@ -959,6 +979,7 @@ class Store:
                 raise
 
         self._run_write(mutate)
+        self._dispatch_quietly()
         fresh = self.day_by_id(saved["day_id"])
         return {
             "ok": True,
@@ -972,6 +993,26 @@ class Store:
             "turns_remaining": self._turns_remaining(fresh, agent_id, self.now()),
             "to_act": False,
         }
+
+    def can_act(self, day: sqlite3.Row | None, agent_id: str, now: datetime) -> bool:
+        """Whether this seat may paint or pass the live slice.
+
+        A missed earlier slice does not matter. TurnView and ``POST /agent/act``
+        both use this, so they cannot disagree about the open slice.
+        """
+        if day is None or int(day["archived"]) or not day["theme"]:
+            return False
+        phase, index = self._phase_for(day, now)
+        if phase != "during" or index is None:
+            return False
+        order = self._order_for(day)
+        if artist_on_slice(order, index) != agent_id:
+            return False
+        if self._is_skipped(day["id"], agent_id):
+            return False
+        if self._action_for_slice(day["id"], index) is not None:
+            return False
+        return True
 
     def _require_slice(self, day: sqlite3.Row, agent_id: str, now: datetime) -> None:
         if int(day["archived"]):
@@ -987,18 +1028,20 @@ class Store:
         order = json.loads(day["artist_order_json"])
         if self._is_skipped(day["id"], agent_id):
             raise ApiError(409, "rounds_skipped", "You already ended your rounds for today.")
-        for mark in clock.slices:
-            if mark.missed and artist_on_slice(order, mark.index) == agent_id:
-                raise ApiError(
-                    409,
-                    "slice_missed",
-                    "That 3-minute slice closed with no paint or pass. The turn has moved on.",
-                )
+        if self.can_act(day, agent_id, now):
+            return
         expected = artist_on_slice(order, index)
         if agent_id != expected:
             previous = index - 1
-            if previous >= 0 and artist_on_slice(order, previous) == agent_id and self._action_for_slice(day["id"], previous):
-                raise ApiError(409, "slice_used", "This 3-minute slice already has an action.")
+            if previous >= 0 and artist_on_slice(order, previous) == agent_id:
+                if self._action_for_slice(day["id"], previous):
+                    raise ApiError(409, "slice_used", "This 3-minute slice already has an action.")
+                if clock.slices[previous].missed:
+                    raise ApiError(
+                        409,
+                        "slice_missed",
+                        "That 3-minute slice closed with no paint or pass. The turn has moved on.",
+                    )
             raise ApiError(
                 409,
                 "not_your_turn",
@@ -1014,7 +1057,9 @@ class Store:
             self._refresh()
             now = self.now()
             day = self.today_row()
-            return self._turn_from(day, agent_id, now)
+            view = self._turn_from(day, agent_id, now)
+        self._dispatch_quietly()
+        return view
 
     def _slice_bounds(
         self,
@@ -1043,13 +1088,7 @@ class Store:
         phase, index = self._phase_for(day, now)
         designed = bool(day and day["theme"])
         order = self._order_for(day)
-        to_act = False
-        if designed and phase == "during" and index is not None:
-            to_act = (
-                artist_on_slice(order, index) == agent_id
-                and not self._is_skipped(day["id"], agent_id)
-                and self._action_for_slice(day["id"], index) is None
-            )
+        to_act = self.can_act(day, agent_id, now)
         turn_left = None if to_act else 0
         if phase == "during" and index is not None:
             round_index = round_on_slice(index)
@@ -1139,6 +1178,258 @@ class Store:
             }
         return self._tick_payload(self.day_by_id(saved["day_id"]), now)
 
+    def cron_tick(self) -> dict[str, Any]:
+        """Create today's canvas if the morning is open, then deliver due wakes.
+
+        Slice close and open are already decided by the session clock. This
+        does not insert a missed-slice row; it notices the clock and wakes
+        whoever that clock says should hear about it.
+        """
+        payload = self.routine_tick()
+        payload["wakes"] = self.dispatch_wakes()
+        return payload
+
+    def dispatch_wakes(self) -> list[dict[str, Any]]:
+        holder: dict[str, list[WakeIntent]] = {"claimed": []}
+
+        def mutate() -> None:
+            holder["claimed"] = []
+            intents = self._due_intents()
+            if not intents:
+                return
+            now_ts = int(self.now().timestamp())
+            if not any(needs_attempt(self.conn, intent, now_ts) for intent in intents):
+                return
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                claimed = claim_intents(self.conn, intents, now_ts)
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+            if claimed:
+                self.dirty = True
+            holder["claimed"] = claimed
+
+        self._run_write(mutate)
+        return [self._post_and_finish(intent) for intent in holder["claimed"]]
+
+    def _dispatch_quietly(self) -> None:
+        try:
+            self.dispatch_wakes()
+        except Exception:
+            logger.exception("wake dispatch failed")
+
+    def _due_intents(self) -> list[WakeIntent]:
+        hooks = self._seat_hooks()
+        if not hooks:
+            return []
+        now = self.now()
+        day = self.today_row()
+        if day is None or int(day["archived"]):
+            return []
+        clock = self._session_clock(day, now)
+        return plan_wakes(
+            day_id=int(day["id"]),
+            theme=bool(day["theme"]),
+            archived=False,
+            phase=clock.phase,
+            index=clock.index,
+            slices=clock.slices,
+            order=self._order_for(day),
+            hooks=hooks,
+            now=now,
+            lock_at=clock.lock_at,
+            api_base_url=public_base_url(),
+        )
+
+    def _post_and_finish(self, intent: WakeIntent) -> dict[str, Any]:
+        try:
+            code = post_webhook(intent.url, intent.secret, intent.payload)
+        except Exception:
+            logger.warning(
+                "wake post failed seat=%s event=%s slice=%s",
+                intent.seat_id,
+                intent.event,
+                intent.slice_index,
+            )
+            code = 0
+        state = "sent" if 200 <= code < 300 else "failed"
+
+        def mutate() -> None:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                changed = finish_wake(
+                    self.conn,
+                    intent,
+                    state,
+                    code,
+                    int(self.now().timestamp()),
+                )
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+            if changed:
+                self.dirty = True
+
+        self._run_write(mutate)
+        return {
+            "day_id": intent.day_id,
+            "slice": None if intent.slice_index < 0 else intent.slice_index,
+            "seat": intent.seat_id,
+            "event": intent.event,
+            "status": state,
+            "attempts": intent.attempts,
+            "last_http": code,
+        }
+
+    def _env_hooks(self) -> dict[str, SeatHook]:
+        try:
+            return hooks_from_env()
+        except WebhookConfigError as exc:
+            raise ApiError(500, "bad_webhook_config", exc.message) from exc
+
+    def _seat_hooks(self) -> list[SeatHook]:
+        env_hooks = self._env_hooks()
+        rows = self.conn.execute(
+            "SELECT seat_id, url, secret, events_json FROM seat_webhooks"
+        ).fetchall()
+        disabled: set[str] = set()
+        stored: dict[str, SeatHook] = {}
+        for row in rows:
+            seat = row["seat_id"]
+            if not row["url"]:
+                disabled.add(seat)
+                continue
+            try:
+                events = json.loads(row["events_json"])
+            except json.JSONDecodeError as exc:
+                raise ApiError(500, "bad_webhook_config", "Stored seat webhook config is unreadable.") from exc
+            if not isinstance(events, list):
+                raise ApiError(500, "bad_webhook_config", "Stored seat webhook config is unreadable.")
+            stored[seat] = SeatHook(seat, row["url"], row["secret"], frozenset(events))
+        merged = {
+            seat: hook
+            for seat, hook in env_hooks.items()
+            if seat not in disabled and seat not in stored
+        }
+        merged.update(stored)
+        return list(merged.values())
+
+    def set_seat_webhook(self, seat_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        try:
+            hook = parse_seat_hook(seat_id, body)
+        except WebhookConfigError as exc:
+            raise ApiError(400, "bad_webhook", exc.message) from exc
+
+        def mutate() -> None:
+            self.conn.execute(
+                """
+                INSERT INTO seat_webhooks (seat_id, url, secret, events_json, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(seat_id) DO UPDATE SET
+                  url = excluded.url,
+                  secret = excluded.secret,
+                  events_json = excluded.events_json,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    hook.seat_id,
+                    hook.url,
+                    hook.secret,
+                    json.dumps(sorted(hook.events)),
+                    int(self.now().timestamp()),
+                ),
+            )
+            self.dirty = True
+
+        self._run_write(mutate)
+        return {
+            "ok": True,
+            "seat": hook.seat_id,
+            "enabled": True,
+            "source": "host",
+            "events": sorted(hook.events),
+            "url": hook.url,
+        }
+
+    def clear_seat_webhook(self, seat_id: str) -> dict[str, Any]:
+        try:
+            seat = normalize_seat(seat_id)
+        except WebhookConfigError as exc:
+            raise ApiError(400, "bad_seat", exc.message) from exc
+
+        def mutate() -> None:
+            self.conn.execute(
+                """
+                INSERT INTO seat_webhooks (seat_id, url, secret, events_json, updated_at)
+                VALUES (?, '', '', '[]', ?)
+                ON CONFLICT(seat_id) DO UPDATE SET
+                  url = '',
+                  secret = '',
+                  events_json = '[]',
+                  updated_at = excluded.updated_at
+                """,
+                (seat, int(self.now().timestamp())),
+            )
+            self.dirty = True
+
+        self._run_write(mutate)
+        return {"ok": True, "seat": seat, "enabled": False}
+
+    def seat_webhook_directory(self) -> dict[str, Any]:
+        with self.lock:
+            self._refresh()
+            try:
+                env_hooks = hooks_from_env()
+            except WebhookConfigError as exc:
+                raise ApiError(500, "bad_webhook_config", exc.message) from exc
+            rows = self.conn.execute(
+                "SELECT seat_id, url, events_json FROM seat_webhooks ORDER BY seat_id"
+            ).fetchall()
+        by_seat: dict[str, dict[str, Any]] = {}
+        for seat, hook in env_hooks.items():
+            by_seat[seat] = {
+                "seat": seat,
+                "enabled": True,
+                "source": "env",
+                "events": sorted(hook.events),
+                "url": hook.url,
+            }
+        for row in rows:
+            seat = row["seat_id"]
+            if not row["url"]:
+                by_seat[seat] = {
+                    "seat": seat,
+                    "enabled": False,
+                    "source": "host",
+                    "events": [],
+                    "url": "",
+                }
+                continue
+            events = json.loads(row["events_json"])
+            by_seat[seat] = {
+                "seat": seat,
+                "enabled": True,
+                "source": "host",
+                "events": sorted(events) if isinstance(events, list) else [],
+                "url": row["url"],
+            }
+        return {"seats": [by_seat[key] for key in sorted(by_seat)]}
+
+    def wakes_for(self, day_id: int | None) -> dict[str, Any]:
+        with self.lock:
+            self._refresh()
+            if day_id is None:
+                day = self.today_row()
+                if day is None:
+                    return {"day_id": None, "wakes": []}
+                day_id = int(day["id"])
+            else:
+                self.day_by_id(day_id)
+            return {"day_id": day_id, "wakes": list_wake_rows(self.conn, day_id)}
+
     def _tick_payload(self, day: sqlite3.Row, now: datetime) -> dict[str, Any]:
         phase, index = self._phase_for(day, now)
         designed = bool(day["theme"])
@@ -1199,7 +1490,9 @@ class Store:
     def watch_state(self, day_id: int | None = None) -> dict[str, Any]:
         with self.lock:
             self._refresh()
-            return self._watch_state(day_id)
+            state = self._watch_state(day_id)
+        self._dispatch_quietly()
+        return state
 
     def gallery(self) -> dict[str, Any]:
         with self.lock:
@@ -1223,6 +1516,7 @@ class Store:
             self.conn.execute("DELETE FROM actions WHERE day_id = ?", (day_id,))
             self.conn.execute("DELETE FROM chat WHERE day_id = ?", (day_id,))
             self.conn.execute("DELETE FROM artist_state WHERE day_id = ?", (day_id,))
+            self.conn.execute("DELETE FROM wakes WHERE day_id = ?", (day_id,))
             self.conn.execute("DELETE FROM days WHERE id = ?", (day_id,))
             self.dirty = True
             return {"ok": True, "day_id": day_id}
@@ -1328,13 +1622,7 @@ class Store:
                     "pixels_remaining_day": PIXELS_PER_ARTIST_DAY,
                     "turns_remaining": self._turns_remaining(featured, agent, now) if is_live else 0,
                     "skipped": self._is_skipped(featured["id"], agent),
-                    "to_act": bool(
-                        is_live
-                        and current == agent
-                        and not self._is_skipped(featured["id"], agent)
-                        and live_index is not None
-                        and self._action_for_slice(featured["id"], live_index) is None
-                    ),
+                    "to_act": bool(is_live and self.can_act(featured, agent, now)),
                 }
             )
         active = next((item for item in artists if item["to_act"]), None)
