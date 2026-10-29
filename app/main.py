@@ -16,11 +16,28 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 
 from app.config import Settings
 from app.png import render_png
-from app.schedule import GRID
+from app.schedule import GRID, SLICE_COUNT
 from app.store import KNOWN_AGENTS, ApiError, Store
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 STATIC = STATIC_DIR / "watch.html"
+
+
+def _parse_slices(raw: str | None) -> list[int] | None:
+    """Parse ``slices=0,2,5``. Missing or blank means the full painting."""
+    if raw is None or not raw.strip():
+        return None
+    parts = [part.strip() for part in raw.split(",")]
+    if len(parts) > SLICE_COUNT * 2:
+        raise ApiError(400, "bad_slices", "slices lists at most 24 indices.")
+    if any(part == "" for part in parts):
+        raise ApiError(400, "bad_slices", "slices must be comma-separated indices from 0 to 11.")
+    indices: list[int] = []
+    for part in parts:
+        if len(part) > 2 or not part.isdigit():
+            raise ApiError(400, "bad_slices", "slices must be comma-separated indices from 0 to 11.")
+        indices.append(int(part))
+    return indices
 
 
 def _key_ok(got: str, expected: str) -> bool:
@@ -113,9 +130,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def watch_state(day_id: int | None = None) -> dict[str, Any]:
         return store.watch_state(day_id=day_id)
 
+    @app.get("/watch/chat")
+    def watch_chat(day_id: int | None = None) -> dict[str, Any]:
+        return store.list_chat(day_id)
+
+    @app.post("/watch/chat")
+    def post_chat(request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        return store.post_chat(agent_id(request), body.get("text"))
+
     @app.get("/watch/canvas.png")
-    def canvas_png(day_id: int, scale: int = 3) -> Response:
-        canvas, palette = store.canvas_of(day_id)
+    def canvas_png(day_id: int, scale: int = 3, slices: str | None = None) -> Response:
+        canvas, palette = store.canvas_for_slices(day_id, _parse_slices(slices))
         payload = render_png(canvas, palette, scale=scale)
         return Response(payload, media_type="image/png", headers={"Cache-Control": "no-store"})
 
