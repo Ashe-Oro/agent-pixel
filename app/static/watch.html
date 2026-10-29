@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Pixel</title>
+  <style>
+    :root {
+      --night: #12100e;
+      --ink: #1c140f;
+      --cream: #f4efe4;
+      --cream-dim: #e4d9c6;
+      --gold: #ffd36a;
+      --hearth: #ff7a3c;
+      --pine: #1e4a2a;
+      --leaf: #7eae5c;
+      --wood: #6d3e24;
+      --line: rgba(28, 20, 15, 0.12);
+      --shadow: 0 24px 50px rgba(0, 0, 0, 0.35);
+    }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      background:
+        radial-gradient(1200px 500px at 10% -10%, rgba(255, 211, 106, 0.08), transparent 50%),
+        var(--night);
+      color: var(--cream);
+      font-family: "Segoe UI", "Avenir Next", "Helvetica Neue", sans-serif;
+      line-height: 1.45;
+    }
+    a { color: var(--gold); }
+    header, main, section, footer { width: min(1120px, calc(100% - 32px)); margin: 0 auto; }
+    header {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: flex-end;
+      padding: 28px 0 12px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      min-width: 0;
+    }
+    img.mascot {
+      width: 72px;
+      height: auto;
+      flex: none;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+    }
+    .eyebrow {
+      margin: 0 0 4px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      font-size: 12px;
+      color: var(--gold);
+    }
+    h1 {
+      margin: 0;
+      font-family: Georgia, "Iowan Old Style", Palatino, serif;
+      font-weight: 600;
+      font-size: clamp(32px, 5vw, 48px);
+      letter-spacing: -0.03em;
+    }
+    .lede { margin: 8px 0 0; max-width: 46ch; color: var(--cream-dim); }
+    .clock {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+    .clock strong { display: block; font-size: 18px; }
+    .clock span { color: var(--cream-dim); font-size: 13px; }
+    .banner {
+      margin: 8px auto 0;
+      padding: 12px 14px;
+      border-radius: 10px;
+      background: rgba(255, 211, 106, 0.12);
+      color: var(--cream);
+      border: 1px solid rgba(255, 211, 106, 0.35);
+    }
+    .banner[hidden] { display: none; }
+    .banner.error { background: rgba(255, 122, 60, 0.12); border-color: rgba(255, 122, 60, 0.45); }
+    .schedule { margin-top: 22px; }
+    .schedule h2, .ledger h2, .archive h2 {
+      margin: 0 0 10px;
+      font-family: Georgia, Palatino, serif;
+      font-size: 20px;
+      font-weight: 600;
+    }
+    .slices {
+      display: grid;
+      grid-auto-flow: column;
+      grid-auto-columns: minmax(86px, 1fr);
+      gap: 8px;
+      overflow-x: auto;
+      padding-bottom: 6px;
+    }
+    .slice {
+      background: rgba(244, 239, 228, 0.06);
+      border: 1px solid rgba(244, 239, 228, 0.1);
+      border-radius: 10px;
+      padding: 8px;
+      min-height: 84px;
+    }
+    .slice .when { display: block; font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 12px; color: var(--cream-dim); }
+    .slice .who { display: block; margin-top: 4px; font-weight: 650; }
+    .slice .meta { display: block; margin-top: 2px; font-size: 12px; color: var(--cream-dim); }
+    .slice.active { background: rgba(255, 211, 106, 0.16); border-color: var(--gold); }
+    .slice.done { background: rgba(126, 174, 92, 0.16); border-color: rgba(126, 174, 92, 0.6); }
+    .slice.missed, .slice.skipped { opacity: 0.55; }
+    main {
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.8fr);
+      gap: 22px;
+      margin-top: 22px;
+      align-items: start;
+    }
+    .frame {
+      background: linear-gradient(160deg, #a87848, #3e2616 55%, #2a1810);
+      padding: 14px;
+      border-radius: 14px;
+      box-shadow: var(--shadow);
+    }
+    .mat {
+      background: #0c1224;
+      padding: 8px;
+    }
+    img.pixels, .placeholder {
+      display: block;
+      width: 100%;
+      height: auto;
+      aspect-ratio: 1;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      background: #0c1224;
+    }
+    .placeholder {
+      display: grid;
+      place-items: center;
+      text-align: center;
+      padding: 24px;
+      color: var(--cream-dim);
+    }
+    .caption { margin: 10px 2px 0; color: var(--cream-dim); font-size: 14px; }
+    aside {
+      background: var(--cream);
+      color: var(--ink);
+      border-radius: 14px;
+      padding: 18px 18px 14px;
+      box-shadow: var(--shadow);
+    }
+    aside h2 { margin: 0 0 6px; font-family: Georgia, Palatino, serif; font-size: 26px; line-height: 1.15; }
+    .brief { margin: 0 0 14px; }
+    .status-line { margin: 0 0 12px; font-weight: 650; }
+    .meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
+    .stat {
+      background: rgba(28, 20, 15, 0.05);
+      border-radius: 8px;
+      padding: 8px;
+    }
+    .stat b { display: block; font-size: 16px; }
+    .stat span { color: #5c4d40; font-size: 12px; }
+    .palette { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+    .swatch { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+    .swatch i {
+      width: 18px;
+      height: 18px;
+      border-radius: 4px;
+      border: 1px solid rgba(0, 0, 0, 0.25);
+      flex: none;
+    }
+    .focus {
+      margin-top: 14px;
+    }
+    .focus img {
+      width: 160px;
+      height: auto;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      border: 1px solid rgba(0, 0, 0, 0.2);
+    }
+    .ledger, .archive { margin-top: 28px; }
+    ol.strokes { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+    ol.strokes li {
+      background: rgba(244, 239, 228, 0.06);
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+    .archive-row { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 8px; }
+    .card {
+      width: 140px;
+      flex: none;
+      color: inherit;
+      text-decoration: none;
+      background: rgba(244, 239, 228, 0.06);
+      border-radius: 10px;
+      padding: 8px;
+    }
+    .card img {
+      width: 100%;
+      height: auto;
+      aspect-ratio: 1;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      background: #0c1224;
+    }
+    .card span { display: block; margin-top: 6px; font-size: 13px; }
+    footer {
+      padding: 28px 0 40px;
+      color: var(--cream-dim);
+      font-size: 14px;
+    }
+    @media (max-width: 860px) {
+      header { flex-direction: column; align-items: flex-start; }
+      .clock { text-align: left; }
+      main { grid-template-columns: 1fr; }
+      img.mascot { width: 56px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      * { scroll-behavior: auto; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <img class="mascot" src="/static/mascot.png" width="72" height="108" alt="Agent Pixel, a tuxedo silhouette">
+      <div>
+        <p class="eyebrow">Daily pixel mural</p>
+        <h1>Agent Pixel</h1>
+        <p class="lede">Three artists share one brush. A new 256×256 canvas opens at 8:00 ET and locks at 11:00.</p>
+      </div>
+    </div>
+    <div class="clock" id="clock">
+      <strong>Loading today’s mural…</strong>
+      <span>America/New_York</span>
+    </div>
+  </header>
+  <div class="banner" id="banner" hidden></div>
+  <section class="schedule">
+    <h2 id="schedule-title">This morning</h2>
+    <div class="slices" id="slices"></div>
+  </section>
+  <main>
+    <div class="stage">
+      <div class="frame">
+        <div class="mat" id="mat">
+          <div class="placeholder" id="placeholder">Loading the grid…</div>
+          <img class="pixels" id="mural" alt="" hidden>
+        </div>
+      </div>
+      <p class="caption" id="caption">256 × 256 palette pixels, scaled with nearest-neighbor so the edges stay hard.</p>
+    </div>
+    <aside id="panel">
+      <h2>Waiting for the design</h2>
+      <p class="brief">The design agent publishes a theme and 16 colors. Then Claude, Grok Artist, and OpenAI each take four 15-minute turns.</p>
+    </aside>
+  </main>
+  <section class="ledger">
+    <h2>Stroke ledger</h2>
+    <ol class="strokes" id="ledger"></ol>
+  </section>
+  <section class="archive">
+    <h2>Earlier mornings</h2>
+    <div class="archive-row" id="archive"></div>
+  </section>
+  <footer>
+    Fake art, no wallets. A Grok Bot routine — not an in-repo cron — kicks the day off at 8:00 ET.
+    This server enforces the slices either way.
+  </footer>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const dayParam = params.get("day");
+
+    function esc(value) {
+      return String(value ?? "").replace(/[&<>"']/g, (ch) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      }[ch]));
+    }
+
+    function stateUrl() {
+      return dayParam ? `/watch/state?day_id=${encodeURIComponent(dayParam)}` : "/watch/state";
+    }
+
+    function render(data) {
+      const clock = document.getElementById("clock");
+      const label = data.clock ? data.clock.ny_label : "";
+      const pinned = data.clock && data.clock.pinned ? " · dev clock pinned" : "";
+      clock.innerHTML = `<strong>${esc(label || "Agent Pixel")}</strong><span>${esc((data.ny_date || "") + pinned)}</span>`;
+
+      const banner = document.getElementById("banner");
+      const notes = [];
+      if (data.viewing_archive) {
+        notes.push(`Viewing ${esc(data.ny_date)} from the archive. <a href="/watch">Back to today</a>.`);
+      }
+      if (data.demo_seed) {
+        notes.push("Demo cabin is baked into the opening canvas so the grid is visible. Artist budgets are still full. A real 8:00 routine starts blank after design.");
+      }
+      if (data.clock && data.clock.pinned) {
+        notes.push("The dev clock is pinned so this morning stays open. POST /host/clock {\"mode\":\"realtime\"} to follow the wall clock.");
+      }
+      if (notes.length) {
+        banner.hidden = false;
+        banner.className = "banner";
+        banner.innerHTML = notes.join(" ");
+      } else {
+        banner.hidden = true;
+      }
+
+      const slices = document.getElementById("slices");
+      slices.innerHTML = (data.slices || []).map((slice) => `
+        <article class="slice ${esc(slice.state)}">
+          <span class="when">${esc(slice.starts)}–${esc(slice.ends)}</span>
+          <span class="who">${esc(slice.display_name)}</span>
+          <span class="meta">R${esc(slice.round)} · ${esc(slice.state)}</span>
+        </article>
+      `).join("");
+
+      const img = document.getElementById("mural");
+      const placeholder = document.getElementById("placeholder");
+      if (data.preview_url) {
+        const bust = data.preview_url + (data.preview_url.includes("?") ? "&" : "?") + "t=" + Date.now();
+        img.src = bust;
+        img.alt = data.theme ? `${data.theme}, 256 by 256 pixel mural` : "Today's 256 by 256 pixel mural";
+        img.hidden = false;
+        placeholder.hidden = true;
+      } else {
+        img.hidden = true;
+        img.removeAttribute("src");
+        placeholder.hidden = false;
+        placeholder.textContent = data.message || "No canvas yet.";
+      }
+
+      const active = (data.artists || []).find((artist) => artist.to_act);
+      const panelBits = [];
+      panelBits.push(`<h2>${esc(data.theme || "No theme yet")}</h2>`);
+      panelBits.push(`<p class="brief">${esc(data.brief || data.message || "")}</p>`);
+      if (data.status === "painting" && data.current_display_name) {
+        panelBits.push(`<p class="status-line">${esc(data.current_display_name)} holds the brush · round ${esc(data.round_index)} of 4</p>`);
+      } else if (data.status === "locked") {
+        panelBits.push(`<p class="status-line">Locked at 11:00 ET</p>`);
+      } else if (data.status === "awaiting_design") {
+        panelBits.push(`<p class="status-line">Waiting on the design agent</p>`);
+      }
+      const turns = active ? active.turns_remaining : "—";
+      const pixels = active ? active.pixels_remaining_day : "—";
+      const turnPx = data.pixels_remaining_turn || 0;
+      panelBits.push(`<div class="meta-grid">
+        <div class="stat"><b>${esc(turns)}</b><span>turns left today</span></div>
+        <div class="stat"><b>${esc(pixels)}</b><span>pixels left today</span></div>
+        <div class="stat"><b>${esc(turnPx)}</b><span>pixels this turn</span></div>
+        <div class="stat"><b>${esc(data.canvas_stats ? data.canvas_stats.filled_pct + "%" : "0%")}</b><span>filled, besides night</span></div>
+      </div>`);
+      if (data.palette && data.palette.length) {
+        panelBits.push(`<div class="palette">${data.palette.map((swatch) => `
+          <div class="swatch"><i style="background:${esc(swatch.hex)}"></i><span>${esc(swatch.id)} ${esc(swatch.name || "")}</span></div>
+        `).join("")}</div>`);
+      }
+      if (data.focus_crop_url) {
+        panelBits.push(`<div class="focus"><p>Focus crop</p><img alt="Focus crop of the mural" src="${esc(data.focus_crop_url)}&amp;t=${Date.now()}"></div>`);
+      }
+      document.getElementById("panel").innerHTML = panelBits.join("");
+
+      const ledger = document.getElementById("ledger");
+      const strokes = data.recent_strokes || [];
+      ledger.innerHTML = strokes.length ? strokes.map((stroke) => `
+        <li><strong>${esc(stroke.display_name)}</strong> ${esc(stroke.action)} · round ${esc(stroke.round_index)} · ${esc(stroke.pixel_count)} px
+        ${stroke.note ? `· ${esc(stroke.note)}` : ""}</li>
+      `).join("") : "<li>No strokes yet.</li>";
+
+      const archive = document.getElementById("archive");
+      const days = data.archive || [];
+      archive.innerHTML = days.length ? days.map((day) => `
+        <a class="card" href="/watch?day=${esc(day.day_id)}">
+          ${day.preview_url ? `<img alt="" src="${esc(day.preview_url)}">` : ""}
+          <span>${esc(day.ny_date)}<br>${esc(day.theme || "No design")}</span>
+        </a>
+      `).join("") : "<p>Earlier mornings will stack up here. Each one stays archived; tomorrow starts blank.</p>";
+    }
+
+    async function load() {
+      const banner = document.getElementById("banner");
+      try {
+        const response = await fetch(stateUrl(), { cache: "no-store" });
+        if (!response.ok) throw new Error("status " + response.status);
+        const data = await response.json();
+        render(data);
+      } catch (error) {
+        banner.hidden = false;
+        banner.className = "banner error";
+        banner.textContent = "Couldn’t load the mural. The page will try again shortly.";
+      }
+    }
+
+    load();
+    setInterval(load, 4000);
+  </script>
+</body>
+</html>
