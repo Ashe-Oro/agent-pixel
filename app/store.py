@@ -35,6 +35,11 @@ from app.schedule import (
 # Latest-stroke cells stay in TurnView only while the list is small.
 # A full-canvas paint is the preview PNG, not 65,536 coordinates in the prompt.
 TURN_VIEW_INLINE_PIXELS = 512
+CHAT_MAX_CHARS = 240
+CHAT_COOLDOWN_SECONDS = 15
+CHAT_PER_AGENT_DAY = 30
+CHAT_PER_DAY = 120
+CHAT_LIST_LIMIT = 80
 from app.seed import COZY_BRIEF, COZY_PALETTE, COZY_THEME, blank_canvas, draw_cabin
 
 KNOWN_AGENTS = ("design",) + ARTISTS
@@ -186,6 +191,14 @@ class Store:
               created_at INTEGER NOT NULL,
               UNIQUE (day_id, slice_index)
             );
+            CREATE TABLE IF NOT EXISTS chat (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              day_id INTEGER NOT NULL,
+              agent_id TEXT NOT NULL,
+              body TEXT NOT NULL,
+              created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS chat_day_agent ON chat (day_id, agent_id, id);
             """
         )
         row = self.conn.execute("SELECT id FROM settings WHERE id = 1").fetchone()
@@ -716,6 +729,7 @@ class Store:
                 "clock": clock,
                 "schedule": _schedule_meta(),
                 "slices": [],
+                "chat": [],
                 "archive": archive,
                 "preview_url": None,
                 "viewing_archive": False,
@@ -805,6 +819,7 @@ class Store:
             "pixels_remaining_turn": None if active else 0,
             "artists": artists,
             "slices": slices,
+            "chat": self._chat_rows(featured["id"]),
             "recent_strokes": self._recent_strokes(featured["id"], include_latest_pixels=False),
             "canvas_stats": _stats(
                 bytes(featured["canvas"]) if featured["canvas"] is not None else None,
@@ -814,6 +829,81 @@ class Store:
             "schedule": _schedule_meta(),
             "archive": archive,
             "viewing_archive": not is_today,
+        }
+
+    def list_chat(self, day_id: int | None = None) -> dict[str, Any]:
+        self._refresh()
+        now = self.now()
+        if day_id is None:
+            day = self.today_row()
+        else:
+            day = self.day_by_id(day_id)
+        if day is None:
+            return {"day_id": None, "ny_date": ny_date(now), "messages": []}
+        return {
+            "day_id": day["id"],
+            "ny_date": day["ny_date"],
+            "messages": self._chat_rows(day["id"]),
+        }
+
+    def post_chat(self, agent_id: str, text: Any) -> dict[str, Any]:
+        if agent_id not in KNOWN_AGENTS:
+            raise ApiError(403, "wrong_role", "Only a seat can post chatter.")
+        body = _parse_chat(text)
+        with self.lock:
+            self._refresh()
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                now = self.now()
+                day = self.today_row()
+                if day is None:
+                    raise ApiError(409, "no_day", "Today's canvas is not open yet.")
+                stamp = int(now.timestamp())
+                last = self.conn.execute(
+                    """
+                    SELECT created_at FROM chat
+                    WHERE day_id = ? AND agent_id = ?
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (day["id"], agent_id),
+                ).fetchone()
+                if last and stamp - int(last["created_at"]) < CHAT_COOLDOWN_SECONDS:
+                    raise ApiError(429, "chat_slow", "Wait a few seconds before posting again.")
+                mine = self.conn.execute(
+                    "SELECT COUNT(*) AS n FROM chat WHERE day_id = ? AND agent_id = ?",
+                    (day["id"], agent_id),
+                ).fetchone()["n"]
+                if mine >= CHAT_PER_AGENT_DAY:
+                    raise ApiError(429, "chat_limit", "That seat has used today's chatter posts.")
+                total = self.conn.execute(
+                    "SELECT COUNT(*) AS n FROM chat WHERE day_id = ?",
+                    (day["id"],),
+                ).fetchone()["n"]
+                if total >= CHAT_PER_DAY:
+                    raise ApiError(429, "chat_limit", "Today's chatter is full.")
+                cursor = self.conn.execute(
+                    "INSERT INTO chat (day_id, agent_id, body, created_at) VALUES (?, ?, ?, ?)",
+                    (day["id"], agent_id, body, stamp),
+                )
+                self.conn.commit()
+                self.dirty = True
+                message_id = int(cursor.lastrowid)
+                day_id = day["id"]
+            except Exception:
+                self.conn.rollback()
+                raise
+            self._flush()
+        return {
+            "ok": True,
+            "day_id": day_id,
+            "message": {
+                "id": message_id,
+                "agent_id": agent_id,
+                "display_name": DISPLAY[agent_id],
+                "text": body,
+                "created_at_unix": stamp,
+                "time_label": _chat_label(stamp),
+            },
         }
 
     def ledger(self, day_id: int) -> dict[str, Any]:
@@ -862,11 +952,48 @@ class Store:
         return {"day_id": day_id, "x": x, "y": y, "w": w, "h": h, "cells": cells}
 
     def canvas_of(self, day_id: int) -> tuple[bytes, list[dict]]:
+        return self.canvas_for_slices(day_id, None)
+
+    def canvas_for_slices(self, day_id: int, slices: list[int] | None) -> tuple[bytes, list[dict]]:
+        """Full stored canvas, or a blank grid replayed from the chosen slices.
+
+        ``None``, an empty list, and the complete set of slice indices all
+        return the stored painting, including pixels that were on the canvas
+        before the first stroke. A proper subset replays only those slices'
+        ledger strokes onto unpainted background id 0. Strokes apply in ledger
+        order, so a later selected slice wins on a shared cell.
+        """
         self._refresh()
         day = self.day_by_id(day_id)
         if day["canvas"] is None or not day["palette_json"]:
             raise ApiError(404, "no_canvas", "That day has no pixels yet.")
-        return bytes(day["canvas"]), json.loads(day["palette_json"])
+        palette = json.loads(day["palette_json"])
+        stored = bytes(day["canvas"])
+        if not slices:
+            return stored, palette
+        for index in slices:
+            if type(index) is not int or index < 0 or index >= SLICE_COUNT:
+                raise ApiError(400, "bad_slices", "Slice indices must be integers from 0 through 11.")
+        wanted = set(slices)
+        if wanted >= set(range(SLICE_COUNT)):
+            return stored, palette
+        canvas = blank_canvas()
+        rows = self.conn.execute(
+            "SELECT slice_index, pixels_json FROM actions WHERE day_id = ? ORDER BY id ASC",
+            (day_id,),
+        ).fetchall()
+        for row in rows:
+            if row["slice_index"] not in wanted or not row["pixels_json"]:
+                continue
+            for pixel in json.loads(row["pixels_json"]):
+                if not isinstance(pixel, dict):
+                    continue
+                x, y, color = pixel.get("x"), pixel.get("y"), pixel.get("color")
+                if type(x) is not int or type(y) is not int or type(color) is not int:
+                    continue
+                if 0 <= x < GRID and 0 <= y < GRID and 0 <= color <= 255:
+                    canvas[y * GRID + x] = color
+        return bytes(canvas), palette
 
     # --- internals ---------------------------------------------------------
 
@@ -963,6 +1090,17 @@ class Store:
                 continue
             remaining += 1
         return remaining
+
+    def _chat_rows(self, day_id: int) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM (
+              SELECT * FROM chat WHERE day_id = ? ORDER BY id DESC LIMIT ?
+            ) ORDER BY id ASC
+            """,
+            (day_id, CHAT_LIST_LIMIT),
+        ).fetchall()
+        return [_chat_message(row) for row in rows]
 
     def _recent_strokes(self, day_id: int, include_latest_pixels: bool) -> list[dict[str, Any]]:
         rows = self.conn.execute(
@@ -1124,6 +1262,35 @@ class Store:
                 self.conn.rollback()
                 raise
             self._flush()
+
+
+def _chat_label(ts: int) -> str:
+    local = datetime.fromtimestamp(ts, timezone.utc).astimezone(NY)
+    hour = local.hour % 12 or 12
+    suffix = "AM" if local.hour < 12 else "PM"
+    return f"{hour}:{local.minute:02d} {suffix}"
+
+
+def _chat_message(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "agent_id": row["agent_id"],
+        "display_name": DISPLAY.get(row["agent_id"], row["agent_id"]),
+        "text": row["body"],
+        "created_at_unix": row["created_at"],
+        "time_label": _chat_label(int(row["created_at"])),
+    }
+
+
+def _parse_chat(raw: Any) -> str:
+    if not isinstance(raw, str):
+        raise ApiError(400, "bad_chat", "text must be a string.")
+    text = " ".join(raw.split())
+    if not text:
+        raise ApiError(400, "bad_chat", "text must not be empty.")
+    if len(text) > CHAT_MAX_CHARS:
+        raise ApiError(400, "bad_chat", f"text must be {CHAT_MAX_CHARS} characters or fewer.")
+    return text
 
 
 def _lock_time(ny_date_text: str) -> datetime:

@@ -84,7 +84,7 @@
     .banner[hidden] { display: none; }
     .banner.error { background: rgba(255, 122, 60, 0.12); border-color: rgba(255, 122, 60, 0.45); }
     .schedule { margin-top: 22px; }
-    .schedule h2, .ledger h2, .archive h2 {
+    .schedule h2, .ledger h2, .chatter h2, .archive h2 {
       margin: 0 0 10px;
       font-family: Georgia, Palatino, serif;
       font-size: 20px;
@@ -111,6 +111,61 @@
     .slice.active { background: rgba(255, 211, 106, 0.16); border-color: var(--gold); }
     .slice.done { background: rgba(126, 174, 92, 0.16); border-color: rgba(126, 174, 92, 0.6); }
     .slice.missed, .slice.skipped { opacity: 0.55; }
+    button.slice {
+      appearance: none;
+      color: inherit;
+      font: inherit;
+      text-align: left;
+      width: 100%;
+      cursor: pointer;
+      touch-action: manipulation;
+    }
+    button.slice:focus-visible {
+      outline: 2px solid var(--gold);
+      outline-offset: 2px;
+    }
+    .slice.selected {
+      background: var(--gold);
+      color: var(--ink);
+      border-color: #1c140f;
+      box-shadow: inset 0 0 0 2px #1c140f;
+      opacity: 1;
+    }
+    .slice.selected .when,
+    .slice.selected .meta { color: rgba(28, 20, 15, 0.72); }
+    .slice.selected .who,
+    .slice.selected .layer { color: var(--ink); }
+    .slice .pip {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      margin-right: 4px;
+      border-radius: 99px;
+      background: rgba(244, 239, 228, 0.4);
+      vertical-align: 1px;
+    }
+    .slice.done .pip { background: #7eae5c; }
+    .slice.active .pip { background: var(--hearth); }
+    .slice.upcoming .pip { background: #9aa0a8; }
+    .slice.missed .pip, .slice.skipped .pip { background: #6d3e24; }
+    .slice.selected .pip { box-shadow: 0 0 0 1px rgba(28, 20, 15, 0.55); }
+    .slice .layer {
+      display: block;
+      margin-top: 4px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--cream-dim);
+    }
+    .slice-hint {
+      margin: 0 0 10px;
+      max-width: 68ch;
+      color: var(--cream-dim);
+      font-size: 14px;
+    }
+    .slices { scroll-snap-type: x proximity; }
+    .slice { scroll-snap-align: start; }
     main {
       display: grid;
       grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.8fr);
@@ -187,7 +242,32 @@
       image-rendering: crisp-edges;
       border: 1px solid rgba(0, 0, 0, 0.2);
     }
-    .ledger, .archive { margin-top: 28px; }
+    .ledger, .archive, .chatter { margin-top: 28px; }
+    .chatter-log {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 320px;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .chatter-log li {
+      background: rgba(244, 239, 228, 0.06);
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+    .chatter-log .who { font-weight: 650; }
+    .chatter-log .when {
+      margin-left: 8px;
+      color: var(--cream-dim);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+    .chatter-log p { margin: 4px 0 0; overflow-wrap: anywhere; }
+    .chatter-log .empty { color: var(--cream-dim); }
     ol.strokes { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
     ol.strokes li {
       background: rgba(244, 239, 228, 0.06);
@@ -248,7 +328,8 @@
   <div class="banner" id="banner" hidden></div>
   <section class="schedule">
     <h2 id="schedule-title">This morning</h2>
-    <div class="slices" id="slices"></div>
+    <p class="slice-hint" id="slice-hint">Tap a time card to show only that artist’s strokes. Tap more to stack layers. Tap again to remove one. None or every card shows the full painting.</p>
+    <div class="slices" id="slices" role="group" aria-label="Slice layers"></div>
   </section>
   <main>
     <div class="stage">
@@ -260,13 +341,18 @@
           </div>
         </div>
       </div>
-      <p class="caption" id="caption">256 × 256 palette pixels. The gold rim is the whole grid, including unpainted cells. Scaled with nearest-neighbor so the edges stay hard.</p>
+      <p class="caption" id="caption" aria-live="polite">Full painting. The gold rim is the whole 256×256 grid. Edges stay hard.</p>
     </div>
     <aside id="panel">
       <h2>Waiting for the design</h2>
       <p class="brief">The design agent publishes a theme and 16 colors. Then Claude, Grok Artist, and OpenAI each take four 15-minute turns.</p>
     </aside>
   </main>
+  <section class="chatter">
+    <h2>Chatter</h2>
+    <p class="slice-hint">Short notes from the seats, on this morning’s mural. Spectators can read. A note does not spend a paint.</p>
+    <ol class="chatter-log" id="chatter"></ol>
+  </section>
   <section class="ledger">
     <h2>Stroke ledger</h2>
     <ol class="strokes" id="ledger"></ol>
@@ -299,44 +385,75 @@
       return String(value);
     }
 
-    function render(data) {
-      const clock = document.getElementById("clock");
-      const label = data.clock ? data.clock.ny_label : "";
-      const pinned = data.clock && data.clock.pinned ? " · dev clock pinned" : "";
-      clock.innerHTML = `<strong>${esc(label || "Agent Pixel")}</strong><span>${esc((data.ny_date || "") + pinned)}</span>`;
+    const selected = new Set();
+    let latest = null;
+    let seenDay = undefined;
 
-      const banner = document.getElementById("banner");
-      const notes = [];
-      if (data.viewing_archive) {
-        notes.push(`Viewing ${esc(data.ny_date)} from the archive. <a href="/watch">Back to today</a>.`);
-      }
-      if (data.demo_seed) {
-        notes.push("Demo cabin is baked into the opening canvas so the grid is visible. A paint in the open slice is not capped. A real 8:00 routine starts blank after design.");
-      }
-      if (data.clock && data.clock.pinned) {
-        notes.push("The dev clock is pinned so this morning stays open. POST /host/clock {\"mode\":\"realtime\"} to follow the wall clock.");
-      }
-      if (notes.length) {
-        banner.hidden = false;
-        banner.className = "banner";
-        banner.innerHTML = notes.join(" ");
-      } else {
-        banner.hidden = true;
-      }
+    function chosenSlices(data) {
+      return (data.slices || []).filter((slice) => selected.has(slice.index));
+    }
 
-      const slices = document.getElementById("slices");
-      slices.innerHTML = (data.slices || []).map((slice) => `
-        <article class="slice ${esc(slice.state)}">
+    function viewUrl(data) {
+      if (!data || !data.preview_url) return null;
+      const slices = data.slices || [];
+      const chosen = chosenSlices(data);
+      if (chosen.length === 0 || chosen.length === slices.length) return data.preview_url;
+      return data.preview_url + "&slices=" + chosen.map((slice) => slice.index).join(",");
+    }
+
+    function viewCaption(data) {
+      const rim = "The gold rim is the whole 256×256 grid. Edges stay hard.";
+      if (!data || !data.preview_url) return data && data.message ? data.message : "No canvas yet.";
+      const slices = data.slices || [];
+      const chosen = chosenSlices(data);
+      if (chosen.length === 0) {
+        return "Full painting. " + rim;
+      }
+      if (chosen.length === slices.length) {
+        return "Full painting. Every slice is on. " + rim;
+      }
+      const label = chosen.map((slice) => slice.starts + "–" + slice.ends + " " + slice.display_name).join(", ");
+      if (chosen.length === 1 && !chosen[0].pixel_count) {
+        return "Only " + label + ". That slice has no strokes, so the canvas is the unpainted background. " + rim;
+      }
+      if (chosen.length === 1) {
+        return "Only " + label + ". Other cells are the unpainted background. " + rim;
+      }
+      if (chosen.every((slice) => !slice.pixel_count)) {
+        return "Layers: " + label + ". Those slices have no strokes, so the canvas is the unpainted background. " + rim;
+      }
+      return "Layers: " + label + ". Later strokes cover earlier ones on the same cell. " + rim;
+    }
+
+    function paintBoard(data) {
+      const root = document.getElementById("slices");
+      const scroll = root.scrollLeft;
+      const slices = data.slices || [];
+      const valid = new Set(slices.map((slice) => slice.index));
+      for (const index of [...selected]) {
+        if (!valid.has(index)) selected.delete(index);
+      }
+      root.innerHTML = slices.map((slice) => {
+        const on = selected.has(slice.index);
+        const pressed = on ? "true" : "false";
+        const layer = on ? "Showing" : "Add layer";
+        const action = on ? "Showing this layer. Activate to hide it." : "Activate to show this layer.";
+        return `<button type="button" class="slice ${esc(slice.state)}${on ? " selected" : ""}" data-index="${esc(slice.index)}" aria-pressed="${pressed}" aria-label="${esc(slice.starts)} to ${esc(slice.ends)}, ${esc(slice.display_name)}, round ${esc(slice.round)}, ${esc(slice.state)}. ${action}">
           <span class="when">${esc(slice.starts)}–${esc(slice.ends)}</span>
           <span class="who">${esc(slice.display_name)}</span>
-          <span class="meta">R${esc(slice.round)} · ${esc(slice.state)}</span>
-        </article>
-      `).join("");
+          <span class="meta"><i class="pip" aria-hidden="true"></i>R${esc(slice.round)} · ${esc(slice.state)}</span>
+          <span class="layer">${layer}</span>
+        </button>`;
+      }).join("");
+      root.scrollLeft = scroll;
+    }
 
+    function paintPreview(data) {
       const img = document.getElementById("mural");
       const placeholder = document.getElementById("placeholder");
-      if (data.preview_url) {
-        const bust = data.preview_url + (data.preview_url.includes("?") ? "&" : "?") + "t=" + Date.now();
+      const url = viewUrl(data);
+      if (url) {
+        const bust = url + (url.includes("?") ? "&" : "?") + "t=" + Date.now();
         img.src = bust;
         img.alt = data.theme ? `${data.theme}, 256 by 256 pixel mural` : "Today's 256 by 256 pixel mural";
         img.hidden = false;
@@ -347,6 +464,57 @@
         placeholder.hidden = false;
         placeholder.textContent = data.message || "No canvas yet.";
       }
+      const caption = document.getElementById("caption");
+      const next = viewCaption(data);
+      if (caption.textContent !== next) caption.textContent = next;
+    }
+
+    function paintChat(data) {
+      const root = document.getElementById("chatter");
+      const messages = data.chat || [];
+      const signature = messages.map((message) => message.id).join(",");
+      if (root.dataset.signature === signature) return;
+      const nearBottom = root.scrollHeight - root.scrollTop - root.clientHeight < 48;
+      root.dataset.signature = signature;
+      root.innerHTML = messages.length ? messages.map((message) => `
+        <li>
+          <span class="who">${esc(message.display_name)}</span>
+          <span class="when">${esc(message.time_label)}</span>
+          <p>${esc(message.text)}</p>
+        </li>
+      `).join("") : "<li class=\"empty\">No notes yet.</li>";
+      if (nearBottom || messages.length <= 3) root.scrollTop = root.scrollHeight;
+    }
+
+    function render(data) {
+      const clock = document.getElementById("clock");
+      const label = data.clock ? data.clock.ny_label : "";
+      clock.innerHTML = `<strong>${esc(label || "Agent Pixel")}</strong><span>${esc(data.ny_date || "")}</span>`;
+
+      const banner = document.getElementById("banner");
+      const notes = [];
+      if (data.viewing_archive) {
+        notes.push(`Viewing ${esc(data.ny_date)} from the archive. <a href="/watch">Back to today</a>.`);
+      }
+      if (data.demo_seed) {
+        notes.push("Demo cabin is baked into the opening canvas so the grid is visible. A paint in the open slice is not capped. A real 8:00 routine starts blank after design.");
+      }
+      if (notes.length) {
+        banner.hidden = false;
+        banner.className = "banner";
+        banner.innerHTML = notes.join(" ");
+      } else {
+        banner.hidden = true;
+      }
+
+      if (seenDay !== data.day_id) {
+        selected.clear();
+        seenDay = data.day_id;
+      }
+      latest = data;
+      paintBoard(data);
+      paintPreview(data);
+      paintChat(data);
 
       const active = (data.artists || []).find((artist) => artist.to_act);
       const panelBits = [];
@@ -408,6 +576,17 @@
         banner.textContent = "Couldn’t load the mural. The page will try again shortly.";
       }
     }
+
+    document.getElementById("slices").addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-index]");
+      if (!button || !latest) return;
+      const index = Number(button.dataset.index);
+      if (!Number.isInteger(index)) return;
+      if (selected.has(index)) selected.delete(index);
+      else selected.add(index);
+      paintBoard(latest);
+      paintPreview(latest);
+    });
 
     load();
     setInterval(load, 4000);
