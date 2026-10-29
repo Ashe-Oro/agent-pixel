@@ -55,6 +55,38 @@ def test_pass_done_skips_remaining_rounds(client):
     assert grok["round_index"] == 1
 
 
+def test_missed_slice_does_not_block_a_later_slice(client):
+    """Missing slice k must not refuse slice k+3. Turn and act agree."""
+    open_design(client, "2026-10-28T08:00:00")
+    pin(client, "2026-10-28T08:06:00")
+    missed_turn = client.get("/agent/turn", headers=auth("grok-artist")).json()
+    assert missed_turn["to_act"] is False
+    assert missed_turn["slice_index"] == 2
+    missed_board = client.get("/watch/state").json()["slices"]
+    assert missed_board[1]["agent_id"] == "grok-artist"
+    assert missed_board[1]["state"] == "missed"
+    missed_act = client.post("/agent/act", headers=auth("grok-artist"), json={"type": "pass"})
+    assert missed_act.status_code == 409
+    assert missed_act.json()["error"] == "slice_missed"
+
+    pin(client, "2026-10-28T08:12:00")
+    later_turn = client.get("/agent/turn", headers=auth("grok-artist")).json()
+    assert later_turn["to_act"] is True
+    assert later_turn["slice_index"] == 4
+    later_act = client.post(
+        "/agent/act",
+        headers=auth("grok-artist"),
+        json={"type": "paint", "pixels": [{"x": 4, "y": 5, "color": 2}], "note": "back on a later slice"},
+    )
+    assert later_act.status_code == 200, later_act.text
+    assert later_act.json()["slice_index"] == 4
+    assert later_act.json()["to_act"] is False
+    state = client.get("/watch/state").json()
+    grok = next(item for item in state["artists"] if item["agent_id"] == "grok-artist")
+    assert grok["to_act"] is False
+    assert state["slice_index"] == 5
+
+
 def test_missed_slice_does_not_roll_the_turn_forward(client):
     open_design(client, "2026-10-28T08:00:00")
     pin(client, "2026-10-28T08:03:00")

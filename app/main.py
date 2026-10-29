@@ -8,6 +8,8 @@ Artist seats: design, TurnView, one paint or pass.
 from __future__ import annotations
 
 import hmac
+import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +23,7 @@ from app.store import KNOWN_AGENTS, ApiError, Store
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 STATIC = STATIC_DIR / "watch.html"
+logger = logging.getLogger(__name__)
 
 
 def _parse_slices(raw: str | None) -> list[int] | None:
@@ -71,9 +74,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             status_code=exc.status,
         )
 
+    @app.middleware("http")
+    async def host_and_cron_errors(request: Request, call_next):
+        """Turn an unexpected crash on host and cron routes into a JSON 500.
+
+        Starlette's server-error middleware writes a plain-text page and then
+        re-raises. Catching here, inside that middleware, keeps the body JSON.
+        """
+        try:
+            return await call_next(request)
+        except Exception:
+            path = request.url.path
+            if not (path.startswith("/host") or path.startswith("/cron")):
+                raise
+            logger.exception("unhandled error")
+            return JSONResponse(
+                {"error": "internal", "message": "Internal server error."},
+                status_code=500,
+            )
+
     def host_guard(request: Request) -> None:
         if not _key_ok(request.headers.get("x-api-key", ""), settings.api_key):
             raise ApiError(401, "unauthorized", "Host routes need a valid X-API-Key.")
+
+    def cron_guard(request: Request) -> None:
+        secret = os.environ.get("CRON_SECRET", "").strip()
+        header = request.headers.get("authorization", "")
+        token = header[7:].strip() if header.lower().startswith("bearer ") else ""
+        if not _key_ok(token, secret):
+            raise ApiError(401, "unauthorized", "Cron routes need Authorization: Bearer CRON_SECRET.")
 
     def agent_id(request: Request) -> str:
         token = request.headers.get("x-seat-token", "").strip()
@@ -179,6 +208,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def routine_tick(request: Request) -> dict[str, Any]:
         host_guard(request)
         return store.routine_tick()
+
+    @app.get("/cron/tick")
+    def cron_tick(request: Request) -> dict[str, Any]:
+        cron_guard(request)
+        return store.cron_tick()
+
+    @app.get("/host/seats/webhooks")
+    def list_seat_webhooks(request: Request) -> dict[str, Any]:
+        host_guard(request)
+        return store.seat_webhook_directory()
+
+    @app.put("/host/seats/{seat_id}/webhook")
+    def put_seat_webhook(seat_id: str, request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        host_guard(request)
+        return store.set_seat_webhook(seat_id, body)
+
+    @app.delete("/host/seats/{seat_id}/webhook")
+    def delete_seat_webhook(seat_id: str, request: Request) -> dict[str, Any]:
+        host_guard(request)
+        return store.clear_seat_webhook(seat_id)
+
+    @app.get("/host/wakes")
+    def host_wakes(request: Request, day_id: int | None = None) -> dict[str, Any]:
+        host_guard(request)
+        return store.wakes_for(day_id)
 
     @app.post("/host/clock")
     def clock(request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
