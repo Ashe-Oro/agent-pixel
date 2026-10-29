@@ -3,16 +3,20 @@
 Public: /skill.md, /watch, /watch/state, crisp PNGs.
 Host key: open a day, move the dev clock, read the ledger.
 Artist seats: design, TurnView, one paint or pass.
+Cron: Vercel calls GET /cron/tick every minute with CRON_SECRET.
 """
 
 from __future__ import annotations
 
 import hmac
+import logging
 from pathlib import Path
 from typing import Any
 
 from fastapi import Body, FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
+
+logger = logging.getLogger(__name__)
 
 from app.config import Settings
 from app.png import render_png
@@ -69,6 +73,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return JSONResponse(
             {"error": exc.error, "message": exc.message},
             status_code=exc.status,
+        )
+
+    @app.exception_handler(Exception)
+    async def on_unexpected(_request: Request, exc: Exception) -> JSONResponse:
+        logger.error("request failed", exc_info=exc)
+        return JSONResponse(
+            {"error": "internal", "message": "The request failed."},
+            status_code=500,
         )
 
     def host_guard(request: Request) -> None:
@@ -174,6 +186,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def delete_day(day_id: int, request: Request, force: bool = False) -> dict[str, Any]:
         host_guard(request)
         return store.delete_day(day_id, force=force)
+
+    def cron_guard(request: Request) -> None:
+        header = request.headers.get("authorization", "")
+        supplied = header[7:].strip() if header.lower().startswith("bearer ") else ""
+        if not _key_ok(supplied, settings.cron_secret):
+            raise ApiError(401, "unauthorized", "Cron routes need Authorization: Bearer CRON_SECRET.")
+
+    @app.get("/cron/tick")
+    def cron_tick(request: Request) -> JSONResponse:
+        """Open the 08:00 ET canvas if needed, then wake the seat the clock says is due."""
+        cron_guard(request)
+        payload = store.routine_tick(report_wakes=True)
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
     @app.post("/host/routine/tick")
     def routine_tick(request: Request) -> dict[str, Any]:

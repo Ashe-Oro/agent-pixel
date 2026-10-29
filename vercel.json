@@ -5,5 +5,11 @@
       "maxDuration": 30,
       "includeFiles": "{skill.md,app/static/**}"
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/cron/tick",
+      "schedule": "* * * * *"
+    }
+  ]
 }

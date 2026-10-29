@@ -10,6 +10,7 @@ metadata, and day ids never change.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -39,6 +40,9 @@ from app.schedule import (
     round_on_slice,
     walk_session,
 )
+from app.wakes import BlobWakeLog, FileWakeLog, WakeDispatcher, WakeSpec
+
+logger = logging.getLogger(__name__)
 
 KIND_MORNING = "morning"
 KIND_PINNED = "pinned"
@@ -104,6 +108,8 @@ class Store:
             self.path = settings.db_path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
+        wake_log = BlobWakeLog() if self.remote else FileWakeLog(self.path.parent / "wakes")
+        self.notifier = WakeDispatcher(settings.wakes, settings.public_base_url, wake_log)
         downloaded = False
         if self.remote:
             downloaded = self._download()
@@ -959,6 +965,7 @@ class Store:
                 raise
 
         self._run_write(mutate)
+        self._safe_notify()
         fresh = self.day_by_id(saved["day_id"])
         return {
             "ok": True,
@@ -973,6 +980,28 @@ class Store:
             "to_act": False,
         }
 
+    def can_act(self, day: sqlite3.Row | None, agent_id: str, now: datetime) -> bool:
+        """True when this seat may paint or pass the slice that is open right now.
+
+        An earlier missed slice does not count. ``turn_view`` and ``act`` both
+        use this, so they cannot disagree about whether the seat may paint.
+        """
+        if day is None or agent_id not in ARTISTS:
+            return False
+        if int(day["archived"]) or not day["theme"] or not day["artist_order_json"]:
+            return False
+        clock = self._session_clock(day, now)
+        if clock.phase != "during" or clock.index is None:
+            return False
+        order = json.loads(day["artist_order_json"])
+        if artist_on_slice(order, clock.index) != agent_id:
+            return False
+        if self._is_skipped(day["id"], agent_id):
+            return False
+        if self._action_for_slice(day["id"], clock.index) is not None:
+            return False
+        return True
+
     def _require_slice(self, day: sqlite3.Row, agent_id: str, now: datetime) -> None:
         if int(day["archived"]):
             raise ApiError(409, "morning_locked", "That canvas is archived.")
@@ -984,21 +1013,24 @@ class Store:
             raise ApiError(409, "before_routine", "Artists paint from 08:00 ET.")
         if phase == "after" or index is None:
             raise ApiError(409, "morning_locked", "This session is locked.")
-        order = json.loads(day["artist_order_json"])
         if self._is_skipped(day["id"], agent_id):
             raise ApiError(409, "rounds_skipped", "You already ended your rounds for today.")
-        for mark in clock.slices:
-            if mark.missed and artist_on_slice(order, mark.index) == agent_id:
-                raise ApiError(
-                    409,
-                    "slice_missed",
-                    "That 3-minute slice closed with no paint or pass. The turn has moved on.",
-                )
+        if self.can_act(day, agent_id, now):
+            return
+        order = json.loads(day["artist_order_json"])
         expected = artist_on_slice(order, index)
         if agent_id != expected:
             previous = index - 1
-            if previous >= 0 and artist_on_slice(order, previous) == agent_id and self._action_for_slice(day["id"], previous):
-                raise ApiError(409, "slice_used", "This 3-minute slice already has an action.")
+            if previous >= 0 and artist_on_slice(order, previous) == agent_id:
+                if self._action_for_slice(day["id"], previous):
+                    raise ApiError(409, "slice_used", "This 3-minute slice already has an action.")
+                # Only the slice that just closed. An older miss must not refuse a later slice.
+                if clock.slices[previous].missed:
+                    raise ApiError(
+                        409,
+                        "slice_missed",
+                        "That 3-minute slice closed with no paint or pass. The turn has moved on.",
+                    )
             raise ApiError(
                 409,
                 "not_your_turn",
@@ -1006,10 +1038,12 @@ class Store:
             )
         if self._action_for_slice(day["id"], index) is not None:
             raise ApiError(409, "slice_used", "This 3-minute slice already has an action.")
+        raise ApiError(409, "morning_locked", "The brush is closed.")
 
     def turn_view(self, agent_id: str) -> dict[str, Any]:
         if agent_id not in ARTISTS:
             raise ApiError(403, "wrong_role", "TurnView is for an artist seat.")
+        self._safe_notify()
         with self.lock:
             self._refresh()
             now = self.now()
@@ -1043,13 +1077,7 @@ class Store:
         phase, index = self._phase_for(day, now)
         designed = bool(day and day["theme"])
         order = self._order_for(day)
-        to_act = False
-        if designed and phase == "during" and index is not None:
-            to_act = (
-                artist_on_slice(order, index) == agent_id
-                and not self._is_skipped(day["id"], agent_id)
-                and self._action_for_slice(day["id"], index) is None
-            )
+        to_act = self.can_act(day, agent_id, now)
         turn_left = None if to_act else 0
         if phase == "during" and index is not None:
             round_index = round_on_slice(index)
@@ -1101,7 +1129,83 @@ class Store:
             "current_agent_id": artist_on_slice(order, index) if index is not None and designed else None,
         }
 
-    def routine_tick(self) -> dict[str, Any]:
+    def _safe_notify(self) -> list[dict[str, Any]]:
+        """Wake whoever the clock says is due. A webhook failure does not fail the request."""
+        try:
+            return self.notify_due()
+        except Exception:
+            logger.exception("wake dispatch failed")
+            return []
+
+    def notify_due(self) -> list[dict[str, Any]]:
+        if not self.notifier.enabled():
+            return []
+        with self.lock:
+            self._refresh()
+            specs = self._wake_specs(self.now())
+        return self.notifier.dispatch(specs)
+
+    def _wake_specs(self, now: datetime) -> list[WakeSpec]:
+        """Artist of the open slice, Ross for the slice that just closed, host when the canvas locks.
+
+        Ross and the host are retried only while the following slice is still open
+        (or, after the last slice, for one more slice length). An artist is not
+        woken once their own slice has closed.
+        """
+        day = self.today_row()
+        if day is None or not day["theme"] or not day["artist_order_json"] or int(day["archived"]):
+            return []
+        clock = self._session_clock(day, now)
+        render = f"/watch/canvas.png?day_id={day['id']}&scale=2"
+        specs: list[WakeSpec] = []
+        if clock.phase == "during" and clock.index is not None:
+            mark = clock.slices[clock.index]
+            seat = artist_on_slice(json.loads(day["artist_order_json"]), mark.index)
+            specs.append(
+                WakeSpec(
+                    storage_key=f"{day['id']}-{mark.index}-{seat}",
+                    event="slice_open",
+                    day_id=int(day["id"]),
+                    slice_index=mark.index,
+                    seat=seat,
+                    ends_at_unix=int(mark.deadline.timestamp()),
+                    eligible=True,
+                    render_url=render,
+                )
+            )
+            if clock.index > 0:
+                specs.append(self._ross_spec(day, clock.slices[clock.index - 1], render, True))
+        elif clock.phase == "after" and clock.slices:
+            last = clock.slices[-1]
+            grace = now < clock.lock_at + timedelta(seconds=SLICE_SECONDS)
+            specs.append(self._ross_spec(day, last, render, grace))
+            specs.append(
+                WakeSpec(
+                    storage_key=f"{day['id']}-lock-host",
+                    event="canvas_locked",
+                    day_id=int(day["id"]),
+                    slice_index=last.index,
+                    seat="host",
+                    ends_at_unix=int(last.closes.timestamp()),
+                    eligible=grace,
+                    render_url=render,
+                )
+            )
+        return specs
+
+    def _ross_spec(self, day: sqlite3.Row, mark: Any, render: str, eligible: bool) -> WakeSpec:
+        return WakeSpec(
+            storage_key=f"{day['id']}-{mark.index}-ross",
+            event="slice_closed",
+            day_id=int(day["id"]),
+            slice_index=mark.index,
+            seat="ross",
+            ends_at_unix=int(mark.closes.timestamp()),
+            eligible=eligible,
+            render_url=render,
+        )
+
+    def routine_tick(self, *, report_wakes: bool = False) -> dict[str, Any]:
         saved: dict[str, Any] = {}
 
         def mutate() -> None:
@@ -1129,7 +1233,7 @@ class Store:
         self._run_write(mutate)
         now = self.now()
         if saved.get("before"):
-            return {
+            payload = {
                 "ok": True,
                 "phase": "before_open",
                 "ny_now": now.astimezone(NY).isoformat(),
@@ -1137,7 +1241,12 @@ class Store:
                 "hint": "Wait until 08:00 America/New_York, then tick again and post a design.",
                 "day": None,
             }
-        return self._tick_payload(self.day_by_id(saved["day_id"]), now)
+        else:
+            payload = self._tick_payload(self.day_by_id(saved["day_id"]), now)
+        wakes = self._safe_notify()
+        if report_wakes:
+            payload["wakes"] = wakes
+        return payload
 
     def _tick_payload(self, day: sqlite3.Row, now: datetime) -> dict[str, Any]:
         phase, index = self._phase_for(day, now)
@@ -1197,6 +1306,7 @@ class Store:
     # --- reads -------------------------------------------------------------
 
     def watch_state(self, day_id: int | None = None) -> dict[str, Any]:
+        self._safe_notify()
         with self.lock:
             self._refresh()
             return self._watch_state(day_id)
@@ -1328,13 +1438,7 @@ class Store:
                     "pixels_remaining_day": PIXELS_PER_ARTIST_DAY,
                     "turns_remaining": self._turns_remaining(featured, agent, now) if is_live else 0,
                     "skipped": self._is_skipped(featured["id"], agent),
-                    "to_act": bool(
-                        is_live
-                        and current == agent
-                        and not self._is_skipped(featured["id"], agent)
-                        and live_index is not None
-                        and self._action_for_slice(featured["id"], live_index) is None
-                    ),
+                    "to_act": bool(is_live and self.can_act(featured, agent, now)),
                 }
             )
         active = next((item for item in artists if item["to_act"]), None)
