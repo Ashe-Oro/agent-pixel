@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from app import blob_db
 from app.config import ROOT, Settings
 from app.main import create_app
-from app.schedule import NY, day_bounds
+from app.schedule import NY, SLICE_SECONDS, day_bounds
 from tests.conftest import DESIGN, auth, host, open_design, pin
 
 
@@ -443,3 +443,126 @@ def test_concurrent_writers_keep_both_updates(tmp_path, monkeypatch):
     first.state.store.close()
     second.state.store.close()
     fresh.state.store.close()
+
+
+def _row_count(client) -> int:
+    return client.app.state.store.conn.execute("SELECT COUNT(*) AS n FROM days").fetchone()["n"]
+
+
+def _undesigned(client) -> int:
+    return client.app.state.store.conn.execute(
+        "SELECT COUNT(*) AS n FROM days WHERE theme IS NULL OR TRIM(theme) = ''"
+    ).fetchone()["n"]
+
+
+def _realtime_clock(moment: datetime):
+    """Patch the store clock while settings stay in realtime."""
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return moment["at"].astimezone(timezone.utc).replace(tzinfo=None)
+            return moment["at"].astimezone(tz)
+
+    return patch("app.store.datetime", FrozenDateTime)
+
+
+def test_realtime_tick_at_1227_keeps_the_live_bonus(client):
+    clock = {"at": datetime(2026, 10, 29, 12, 27, tzinfo=NY)}
+    with _realtime_clock(clock):
+        empty = client.post("/host/routine/tick", headers=host())
+        assert empty.status_code == 200, empty.text
+        assert empty.json()["phase"] == "locked"
+        assert empty.json()["day"] is None
+        assert _row_count(client) == 0
+        assert _undesigned(client) == 0
+
+        opened = client.post("/host/canvas/new", headers=host())
+        assert opened.status_code == 200, opened.text
+        bonus_id = opened.json()["day"]["day_id"]
+        designed = client.post("/agent/design", headers=auth("design"), json=DESIGN)
+        assert designed.status_code == 200, designed.text
+        before = _row_count(client)
+        tick = client.post("/host/routine/tick", headers=host())
+        assert tick.status_code == 200, tick.text
+        body = tick.json()
+        assert body["phase"] == "slice"
+        assert body["day"]["day_id"] == bonus_id
+        assert body["day"]["kind"] == "bonus"
+        assert body["day"]["archived"] is False
+        assert _row_count(client) == before
+        assert _undesigned(client) == 0
+        stored = client.app.state.store.conn.execute(
+            "SELECT archived FROM days WHERE id = ?",
+            (bonus_id,),
+        ).fetchone()
+        assert stored["archived"] == 0
+
+
+def test_realtime_bonus_advances_on_act_and_times_out_on_the_clock(client):
+    clock = {"at": datetime(2026, 10, 29, 12, 27, tzinfo=NY)}
+    with _realtime_clock(clock):
+        opened = client.post("/host/canvas/new", headers=host())
+        assert opened.status_code == 200, opened.text
+        bonus_id = opened.json()["day"]["day_id"]
+        assert client.post("/agent/design", headers=auth("design"), json=DESIGN).status_code == 200
+        state = client.get("/watch/state").json()
+        first, second, third = [item["agent_id"] for item in state["artists"][:3]]
+        assert state["artists"][0]["to_act"] is True
+        acted = client.post(
+            "/agent/act",
+            headers=auth(first),
+            json={"type": "paint", "pixels": [{"x": 2, "y": 2, "color": 4}]},
+        )
+        assert acted.status_code == 200, acted.text
+        assert client.get("/agent/turn", headers=auth(second)).json()["to_act"] is True
+        clock["at"] = clock["at"] + timedelta(seconds=SLICE_SECONDS)
+        missed = client.get("/watch/state").json()
+        assert missed["day_id"] == bonus_id
+        assert missed["current_agent_id"] == third
+        assert missed["slices"][1]["state"] == "missed"
+        late = client.post(
+            "/agent/act",
+            headers=auth(second),
+            json={"type": "paint", "pixels": [{"x": 3, "y": 3, "color": 5}]},
+        )
+        assert late.status_code == 409
+        assert late.json()["error"] == "slice_missed"
+        assert client.get(
+            f"/host/days/{bonus_id}/region",
+            params={"x": 3, "y": 3, "w": 1, "h": 1},
+            headers=host(),
+        ).json()["cells"] == [0]
+        assert _row_count(client) == 1
+        assert _undesigned(client) == 0
+
+
+def test_next_morning_tick_archives_a_leftover_bonus(client):
+    clock = {"at": datetime(2026, 10, 29, 12, 27, tzinfo=NY)}
+    with _realtime_clock(clock):
+        opened = client.post("/host/canvas/new", headers=host())
+        assert opened.status_code == 200, opened.text
+        bonus_id = opened.json()["day"]["day_id"]
+        assert client.post("/agent/design", headers=auth("design"), json=DESIGN).status_code == 200
+        clock["at"] = datetime(2026, 10, 30, 8, 0, tzinfo=NY)
+        before = _row_count(client)
+        tick = client.post("/host/routine/tick", headers=host())
+        assert tick.status_code == 200, tick.text
+        body = tick.json()
+        assert body["phase"] == "awaiting_design"
+        morning_id = body["day"]["day_id"]
+        assert morning_id != bonus_id
+        assert body["day"]["kind"] == "morning"
+        assert body["day"]["theme"] is None
+        assert _row_count(client) == before + 1
+        archived = client.app.state.store.conn.execute(
+            "SELECT archived FROM days WHERE id = ?",
+            (bonus_id,),
+        ).fetchone()
+        assert archived["archived"] == 1
+        extras = client.app.state.store.conn.execute(
+            "SELECT COUNT(*) AS n FROM days WHERE theme IS NULL AND id != ?",
+            (morning_id,),
+        ).fetchone()["n"]
+        assert extras == 0
