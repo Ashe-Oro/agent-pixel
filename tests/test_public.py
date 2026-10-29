@@ -12,8 +12,8 @@ def test_skill_matches_contract(client):
     assert body == (ROOT / "skill.md").read_text(encoding="utf-8")
     assert "256×256" in body
     assert "08:00" in body
-    assert "11:00" in body
-    assert "15-minute" in body
+    assert "08:36" in body
+    assert "3-minute" in body
     assert "grok-artist" in body
     assert "4 turns/day" in body
     assert "8 turns" not in body

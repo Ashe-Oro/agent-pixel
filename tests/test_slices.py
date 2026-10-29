@@ -94,7 +94,6 @@ def test_subset_replay_and_default_full_view(client):
             {"x": 10, "y": 10, "color": 4},
             {"x": 12, "y": 10, "color": 5},
         ],
-        "2026-10-28T08:15:00",
     )
     paint(
         client,
@@ -103,7 +102,6 @@ def test_subset_replay_and_default_full_view(client):
             {"x": 10, "y": 10, "color": 0},
             {"x": 13, "y": 10, "color": 6},
         ],
-        "2026-10-28T08:30:00",
     )
     colors = palette_colors(client)
 
@@ -190,7 +188,7 @@ def test_passed_slice_filters_to_background(client):
     day_id = opened["day_id"]
     passed = client.post("/agent/act", headers=auth("claude"), json={"type": "pass", "note": "yield"})
     assert passed.status_code == 200, passed.text
-    paint(client, "grok-artist", [{"x": 4, "y": 4, "color": 3}], "2026-10-28T08:15:00")
+    paint(client, "grok-artist", [{"x": 4, "y": 4, "color": 3}])
     colors = palette_colors(client)
 
     full = canvas_image(client, day_id)

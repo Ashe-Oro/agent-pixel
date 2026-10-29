@@ -46,7 +46,7 @@ def main(argv: list[str]) -> int:
     status, content_type, body = fetch(base + "/skill.md")
     text = body.decode("utf-8", errors="replace")
     print(f"GET /skill.md {status} {content_type}")
-    if status != 200 or not text.startswith("# Agent Pixel") or "15-minute" not in text or "08:00" not in text:
+    if status != 200 or not text.startswith("# Agent Pixel") or "3-minute" not in text or "08:00" not in text:
         print("  expected the Agent Pixel skill with the morning schedule")
         failed = True
 

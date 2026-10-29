@@ -38,7 +38,7 @@ def test_duplicate_collapse_charges_unique_cells_and_last_wins(client):
     assert body["pixels_remaining_turn"] == 0
     assert cells(client, day_id, 1, 2, w=2) == [4, 4]
     # A same-cell batch of 64 still costs one pixel and consumes the slice.
-    pin(client, "2026-10-28T08:45:00")
+    pin(client, "2026-10-28T08:06:00")
     repeated = [{"x": 3, "y": 3, "color": 2} for _ in range(64)]
     repeated[-1]["color"] = 5
     response = client.post("/agent/act", headers=auth("claude"), json={"type": "paint", "pixels": repeated})
@@ -88,7 +88,7 @@ def test_open_slice_has_no_pixel_cap_and_can_cover_the_grid(client):
     assert cells(client, day_id, 0, 2) == [0]
 
     # A later slice can still paint every cell, including ones already used today.
-    pin(client, "2026-10-28T08:45:00")
+    pin(client, "2026-10-28T08:06:00")
     later = client.get("/agent/turn", headers=auth("claude")).json()
     assert later["to_act"] is True
     assert later["pixels_remaining_turn"] is None
@@ -103,7 +103,6 @@ def test_open_slice_has_no_pixel_cap_and_can_cover_the_grid(client):
     assert cells(client, day_id, 0, 255) == [4]
     assert cells(client, day_id, 255, 255) == [4]
 
-    pin(client, "2026-10-28T09:00:00")
     grok = client.get("/agent/turn", headers=auth("grok-artist")).json()
     assert grok["to_act"] is True
     assert grok["pixels_remaining_turn"] is None
