@@ -32,14 +32,16 @@ def install_poster(monkeypatch, status=200):
     return seen
 
 
-def set_hook(client, seat, events, url="http://127.0.0.1:9/wake", secret=SECRET):
-    response = client.put(
-        f"/host/seats/{seat}/webhook",
-        headers=host(),
-        json={"url": url, "secret": secret, "events": events},
-    )
+def set_hook(client, seat, events, url="http://127.0.0.1:9/wake", secret=SECRET, extra=None):
+    body = {"url": url, "events": events}
+    if secret:
+        body["secret"] = secret
+    if extra:
+        body.update(extra)
+    response = client.put(f"/host/seats/{seat}/webhook", headers=host(), json=body)
     assert response.status_code == 200, response.text
-    assert secret not in response.text
+    if secret:
+        assert secret not in response.text
     return response.json()
 
 
@@ -205,7 +207,14 @@ def test_clearing_a_webhook_beats_the_env_map(client, monkeypatch):
     assert seen == []
     directory = client.get("/host/seats/webhooks", headers=host()).json()["seats"]
     assert directory == [
-        {"seat": "grok-artist", "enabled": False, "source": "host", "events": [], "url": ""}
+        {
+            "seat": "grok-artist",
+            "enabled": False,
+            "source": "host",
+            "events": [],
+            "url": "",
+            "bearer_set": False,
+        }
     ]
 
 
@@ -283,6 +292,83 @@ def test_bad_webhook_config_and_tick_crashes_are_json(client, monkeypatch):
     cron_crashed = client.get("/cron/tick", headers=CRON)
     assert cron_crashed.status_code == 500
     assert cron_crashed.json()["error"] == "internal"
+
+
+def test_bearer_is_sent_and_never_returned(client, monkeypatch):
+    seen = install_poster(monkeypatch)
+    bearer = "sender-key-do-not-leak"
+    saved = set_hook(
+        client,
+        "claude",
+        ["slice_open"],
+        secret="",
+        extra={"bearer": bearer},
+    )
+    assert saved["bearer_set"] is True
+    assert bearer not in json.dumps(saved)
+    open_design(client, "2026-10-28T08:00:00")
+    client.get("/agent/turn", headers=auth("claude"))
+    assert len(seen) == 1
+    headers = {key.lower(): value for key, value in seen[0]["headers"].items()}
+    assert headers["authorization"] == f"Bearer {bearer}"
+    assert "x-agent-pixel-signature" not in headers
+    assert bearer.encode() not in seen[0]["body"]
+    listed = client.get("/host/seats/webhooks", headers=host())
+    assert listed.status_code == 200
+    assert bearer not in listed.text
+    assert listed.json()["seats"][0]["bearer_set"] is True
+    wakes = client.get("/host/wakes", headers=host())
+    assert bearer not in wakes.text
+
+    both = client.put(
+        "/host/seats/grok-artist/webhook",
+        headers=host(),
+        json={
+            "url": "http://127.0.0.1:9/grok",
+            "secret": SECRET,
+            "bearer": bearer,
+            "events": ["slice_open"],
+        },
+    )
+    assert both.status_code == 200, both.text
+    assert bearer not in both.text
+    assert SECRET not in both.text
+    assert both.json()["bearer_set"] is True
+    client.post("/agent/act", headers=auth("claude"), json={"type": "pass"})
+    grok = next(item for item in seen if item["url"].endswith("/grok"))
+    grok_headers = {key.lower(): value for key, value in grok["headers"].items()}
+    assert grok_headers["authorization"] == f"Bearer {bearer}"
+    body = grok["body"]
+    stamp = grok_headers["x-agent-pixel-timestamp"]
+    expected = hmac.new(SECRET.encode(), stamp.encode() + b"." + body, hashlib.sha256).hexdigest()
+    assert grok_headers["x-agent-pixel-signature"] == f"sha256={expected}"
+    assert bearer.encode() not in body
+
+    missing = client.put(
+        "/host/seats/openai/webhook",
+        headers=host(),
+        json={"url": "http://127.0.0.1:9/openai", "events": ["slice_open"]},
+    )
+    assert missing.status_code == 400
+    assert missing.json()["error"] == "bad_webhook"
+
+
+def test_env_bearer_wakes_without_an_hmac_secret(client, monkeypatch):
+    seen = install_poster(monkeypatch)
+    bearer = "env-sender-key-do-not-leak"
+    monkeypatch.setenv(
+        "TILE_SEAT_WEBHOOKS",
+        json.dumps({"claude": {"url": "http://127.0.0.1:9/claude", "bearer": bearer}}),
+    )
+    open_design(client, "2026-10-28T08:00:00")
+    client.get("/watch/state")
+    assert len(seen) == 1
+    headers = {key.lower(): value for key, value in seen[0]["headers"].items()}
+    assert headers["authorization"] == f"Bearer {bearer}"
+    directory = client.get("/host/seats/webhooks", headers=host())
+    assert bearer not in directory.text
+    assert directory.json()["seats"][0]["bearer_set"] is True
+    assert directory.json()["seats"][0]["source"] == "env"
 
 
 def test_seat_without_a_webhook_still_polls(client, monkeypatch):
