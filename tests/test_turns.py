@@ -1,8 +1,8 @@
 from tests.conftest import auth, host, open_design, pin
 
 
-def test_off_slice_is_rejected_and_pass_waits_for_the_quarter_hour(client):
-    open_design(client, "2026-10-28T08:05:00")
+def test_off_slice_is_rejected_and_pass_opens_the_next_artist(client):
+    open_design(client, "2026-10-28T08:00:00")
     claude = client.get("/agent/turn", headers=auth("claude")).json()
     grok = client.get("/agent/turn", headers=auth("grok-artist")).json()
     assert claude["to_act"] is True
@@ -21,10 +21,7 @@ def test_off_slice_is_rejected_and_pass_waits_for_the_quarter_hour(client):
     assert passed.status_code == 200, passed.text
     assert passed.json()["turns_remaining"] == 3
     assert passed.json()["to_act"] is False
-    # Passing ends Claude's slice early but does not start Grok until 08:15.
-    still = client.get("/agent/turn", headers=auth("grok-artist")).json()
-    assert still["to_act"] is False
-    pin(client, "2026-10-28T08:15:00")
+    # Passing closes this slice immediately. Grok's 3 minutes start now.
     grok_now = client.get("/agent/turn", headers=auth("grok-artist")).json()
     assert grok_now["to_act"] is True
     assert grok_now["round_index"] == 1
@@ -43,7 +40,6 @@ def test_pass_done_skips_remaining_rounds(client):
     )
     assert response.status_code == 200, response.text
     assert response.json()["turns_remaining"] == 0
-    pin(client, "2026-10-28T08:45:00")
     skipped = client.post(
         "/agent/act",
         headers=auth("claude"),
@@ -54,15 +50,14 @@ def test_pass_done_skips_remaining_rounds(client):
     state = client.get("/watch/state").json()
     claude_slices = [item for item in state["slices"] if item["agent_id"] == "claude"]
     assert [item["state"] for item in claude_slices] == ["done", "skipped", "skipped", "skipped"]
-    pin(client, "2026-10-28T09:00:00")
     grok = client.get("/agent/turn", headers=auth("grok-artist")).json()
     assert grok["to_act"] is True
-    assert grok["round_index"] == 2
+    assert grok["round_index"] == 1
 
 
 def test_missed_slice_does_not_roll_the_turn_forward(client):
     open_design(client, "2026-10-28T08:00:00")
-    pin(client, "2026-10-28T08:15:00")
+    pin(client, "2026-10-28T08:03:00")
     claude = client.get("/agent/turn", headers=auth("claude")).json()
     assert claude["to_act"] is False
     assert claude["turns_remaining"] == 3
@@ -72,7 +67,7 @@ def test_missed_slice_does_not_roll_the_turn_forward(client):
         json={"type": "paint", "pixels": [{"x": 0, "y": 0, "color": 1}]},
     )
     assert late.status_code == 409
-    assert late.json()["error"] == "not_your_turn"
+    assert late.json()["error"] == "slice_missed"
 
 
 def test_before_eight_and_eleven_lock(client):
@@ -151,7 +146,8 @@ def test_new_day_is_a_blank_canvas(client):
     assert painted.status_code == 200, painted.text
     pin(client, "2026-10-29T08:00:00")
     state = client.get("/watch/state")
-    assert state.json()["status"] == "no_day"
+    assert state.json()["day_id"] == opened["day_id"]
+    assert state.json()["status"] == "locked"
     tick = client.post("/host/routine/tick", headers=host())
     assert tick.status_code == 200
     assert tick.json()["phase"] == "awaiting_design"

@@ -12,16 +12,16 @@ from app.schedule import (
 )
 
 
-def test_twelve_slices_cover_eight_to_eleven():
+def test_twelve_slices_cover_eight_to_eight_thirty_six():
     day = date(2026, 10, 28)
     start, lock = day_bounds(day)
     assert label_hhmm(start) == "08:00"
-    assert label_hhmm(lock) == "11:00"
+    assert label_hhmm(lock) == "08:36"
     first_begin, first_end = slice_window(day, 0)
     last_begin, last_end = slice_window(day, 11)
     assert first_begin == start
-    assert label_hhmm(first_end) == "08:15"
-    assert label_hhmm(last_begin) == "10:45"
+    assert label_hhmm(first_end) == "08:03"
+    assert label_hhmm(last_begin) == "08:33"
     assert last_end == lock
     order = ["claude", "grok-artist", "openai"]
     sequence = [artist_on_slice(order, index) for index in range(12)]
@@ -32,10 +32,10 @@ def test_twelve_slices_cover_eight_to_eleven():
 def test_position_boundaries():
     assert position(parse_ny_local("2026-10-28T07:59:59")) == ("before", None)
     assert position(parse_ny_local("2026-10-28T08:00:00")) == ("during", 0)
-    assert position(parse_ny_local("2026-10-28T08:14:59")) == ("during", 0)
-    assert position(parse_ny_local("2026-10-28T08:15:00")) == ("during", 1)
-    assert position(parse_ny_local("2026-10-28T10:59:59")) == ("during", 11)
-    assert position(parse_ny_local("2026-10-28T11:00:00")) == ("after", None)
+    assert position(parse_ny_local("2026-10-28T08:02:59")) == ("during", 0)
+    assert position(parse_ny_local("2026-10-28T08:03:00")) == ("during", 1)
+    assert position(parse_ny_local("2026-10-28T08:35:59")) == ("during", 11)
+    assert position(parse_ny_local("2026-10-28T08:36:00")) == ("after", None)
 
 
 def test_rotation_by_day_index():

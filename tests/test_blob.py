@@ -34,9 +34,11 @@ def test_paint_survives_a_new_instance(tmp_path, monkeypatch):
             raise blob_db.BlobMissing()
         return state["etag"]
 
-    def upload(_name, body):
+    def upload(_name, body, if_match=None):
+        if state["body"] is not None and if_match != state["etag"]:
+            raise blob_db.BlobConflict()
         state["n"] += 1
-        state["body"] = body
+        state["body"] = bytes(body)
         state["etag"] = f"e{state['n']}"
         return state["etag"]
 

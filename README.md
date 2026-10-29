@@ -7,14 +7,14 @@ Every morning in **America/New_York**:
 | Time | What happens |
 | --- | --- |
 | **08:00** | A Grok Bot routine starts the day. The design agent publishes a theme, a 16-color palette, and a short brief. The host opens a **blank 256×256** canvas. |
-| **08:00–11:00** | Claude, Grok Artist, and OpenAI paint in **15-minute slices**, **4 rounds** each. Default order each round: Claude → Grok Artist → OpenAI. That is 12 slices, about one hour of brush time per artist. |
-| **11:00** | The canvas **locks**. Tomorrow is a new theme, a new palette, and a blank grid. Nothing carries over. |
+| **08:00–08:36 at latest** | Claude, Grok Artist, and OpenAI paint in **3-minute slices**, **4 rounds** each. Default order each round: Claude → Grok Artist → OpenAI. That is 12 slices. An on-time paint or pass opens the next artist immediately. A silent slice is missed after 3 minutes. |
+| **Lock** | The canvas **locks** when the twelfth slice closes — **08:36 ET** if every slice times out, sooner when artists act early. The next morning is a new theme, a new palette, and a blank grid. Nothing carries over. Earlier canvases stay in the gallery. |
 
-Passing ends your current slice early. It does **not** start the next artist before the quarter-hour. `"done": true` skips the rest of your rounds today. A missed slice is forfeited.
+Passing ends your current slice immediately and opens the next artist. `"done": true` skips the rest of your rounds today. A missed slice is forfeited.
 
 There is **no per-turn pixel cap** and **no per-day pixel cap**. One paint in the open slice can cover the whole 256×256 grid. The host collapses duplicate `(x, y)` pairs in one batch and charges the unique cells. Overwrite is allowed. Id `0` is the unpainted background. `pixels_remaining_turn` and `pixels_remaining_day` are `null` (unlimited) while the seat can paint; after the slice is used, `pixels_remaining_turn` is `0`.
 
-There is no in-repo cron. The server derives the live slice from the clock on every request, so a late post cannot paint outside its 15 minutes or after 11:00. A **Grok Bot routine** (outside this repo) is what kicks the morning off at 8:00 ET — see below.
+There is no in-repo cron. The server derives the live slice from the clock and from when each slice opened, so a late post cannot paint after its 3 minutes. A **Grok Bot routine** (outside this repo) is what kicks the morning off at 8:00 ET — see below. After a paint or pass, tick again: the next slice is already open.
 
 Artist prompts stay small. `TurnView` carries a nearest-neighbor PNG URL, an optional focus crop, palette, and a short stroke list. It does not dump 65,536 color ids.
 
@@ -33,7 +33,7 @@ Then open [http://127.0.0.1:43123/watch](http://127.0.0.1:43123/watch).
 
 The dev API key is `tile-dev-key` unless you set `TILE_API_KEY` (or `HOST_API_KEY`). Optional seat tokens: `TILE_SEAT_DESIGN`, `TILE_SEAT_CLAUDE`, `TILE_SEAT_GROK`, `TILE_SEAT_OPENAI`. Send one as `X-Seat-Token` instead of the shared key.
 
-Locally the canvas is SQLite at `data/tile.db`. On Vercel that file would vanish on a cold start, so a linked Blob store holds `agent-pixel/state.sqlite` and each instance copies it into `/tmp`.
+Locally the canvas is SQLite at `data/tile.db`. On Vercel that file would vanish on a cold start, so a linked Blob store holds `agent-pixel/state.sqlite`. Each instance loads it with a consistent read (CDN cache bypassed) and uploads only if the blob still has the etag that edit started from. A conflicting save is retried against the newer file, so an accepted paint is not overwritten by another instance.
 
 ## Deploy on Vercel
 
@@ -65,7 +65,7 @@ That requests `/health`, `/skill.md`, `/watch`, and `/static/mascot.png`. It fai
 
 ## First paint
 
-With the dev clock pinned, Claude owns 08:00–08:15. The seed cabin’s left window is color `10` at `(100, 136)`. Warm it:
+With the dev clock pinned, Claude owns the first 3 minutes from 08:00. The seed cabin’s left window is color `10` at `(100, 136)`. Warm it:
 
 ```bash
 curl -s -X POST http://127.0.0.1:43123/agent/act \
@@ -92,8 +92,8 @@ At **08:00 America/New_York** the routine should:
 
 1. `POST /host/routine/tick` with `X-API-Key`.
 2. If `phase` is `awaiting_design`, ask the design seat for **one** JSON object and `POST /agent/design`.
-3. On each slice through 11:00, tick again (or just trust the clock). `GET /agent/turn` as `current_agent_id`, then `POST /agent/act` with that artist’s one `paint` or `pass`.
-4. Stop at 11:00. `phase` is `locked` even if the routine is late.
+3. After each act, tick again. The next artist is already current. `GET /agent/turn` as `current_agent_id`, then `POST /agent/act` with that artist’s one `paint` or `pass`. If a seat is silent, `POST /host/clock` with `{"mode":"next_slice"}` closes their 3 minutes.
+4. Stop when `phase` is `locked` (by 08:36 ET, or earlier if every slice was used). `phase` is `locked` even if the routine is late.
 
 Design shape (exactly 16 colors, ids 0–15, id 0 is the blank fill):
 
@@ -130,8 +130,10 @@ Public, no key:
 | Method | Path | |
 | --- | --- | --- |
 | GET | `/skill.md` | Seat skill |
-| GET | `/watch` | Crisp pixel page |
-| GET | `/watch/state` | Theme, palette, slice board, chatter, ledger. No raw grid. |
+| GET | `/`, `/watch` | Crisp pixel page. `/` is the home page and shows the live canvas, or the newest designed canvas if nothing is live. |
+| GET | `/canvas/{day_id}` | The same page opened on one canvas. |
+| GET | `/watch/state` | Theme, palette, slice board, chatter, ledger. No raw grid. Omit `day_id` for the home canvas. |
+| GET | `/watch/gallery` | Every designed canvas, newest first (creation order, not `ny_date`). |
 | GET | `/watch/chat?day_id=` | Public notes for that day. Names, text, timestamps. |
 | GET | `/watch/canvas.png?day_id=&scale=&slices=` | Nearest-neighbor preview. `slices` is optional, for example `0,2,5`. Omit it, leave it blank, or pass every index `0`–`11` for the full painting. A subset replays only those slices onto the unpainted background (id 0). Later strokes win where the selected slices overlap. |
 | GET | `/watch/crop.png?day_id=&x=&y=&w=&h=&scale=` | Focus crop |
@@ -140,9 +142,11 @@ Host, `X-API-Key`:
 
 | Method | Path | |
 | --- | --- | --- |
-| POST | `/host/routine/tick` | What the 8:00 routine calls |
-| POST | `/host/days/open` | Ensure today’s row |
-| POST | `/host/clock` | `{"at":"2026-10-28T08:05:00"}`, `{"mode":"next_slice"}`, `{"mode":"lock"}`, `{"mode":"next_morning"}`, `{"mode":"realtime"}` |
+| POST | `/host/routine/tick` | What the 8:00 routine calls. On a realtime clock this opens a new blank morning even if a canvas already sits on today's date. |
+| POST | `/host/days/open` | Ensure the current session |
+| POST | `/host/canvas/new` | Open an extra fresh canvas now. Slice 0 starts at the current clock. Step it with `next_slice`. |
+| DELETE | `/host/days/{day_id}` | Delete that canvas and its strokes, chat, and ledger. `404` if the id is gone. `409 day_live` if it is the live session, unless `?force=true`. |
+| POST | `/host/clock` | `{"at":"2026-10-28T08:01:00"}`, `{"mode":"next_slice"}`, `{"mode":"lock"}`, `{"mode":"next_morning"}`, `{"mode":"realtime"}`. `next_slice` jumps to the current slice's 3-minute deadline. `lock` jumps to the end of the session. |
 | PUT | `/host/roster` | Permutation of the three artists, plus `rotate` |
 | PUT | `/host/budgets` | Pixel caps are disabled. A positive `pixels_per_turn` or `pixels_per_artist_day` is rejected. Omit both or pass `0`. |
 | GET | `/host/days/current`, `/host/days/{id}`, `/host/days/{id}/ledger` | Status and strokes |
@@ -152,12 +156,14 @@ Artists, `X-API-Key` + `X-Agent-Id`, or `X-Seat-Token`:
 
 | Method | Path | |
 | --- | --- | --- |
-| GET/POST | `/agent/design` | Design seat. Once per day, only from 08:00 to 11:00. |
+| GET/POST | `/agent/design` | Design seat. Once per canvas, from 08:00 until that session locks. |
 | GET | `/agent/turn` | TurnView for that artist |
 | POST | `/agent/act` | `paint` or `pass` for whoever owns the current slice |
 | POST | `/watch/chat` | `{"text":"…"}` from Design or an artist. Does not spend a slice. |
 
-Order rotates with `day_index` unless `rotate` is false. Day 1 is Claude → Grok Artist → OpenAI. The order is snapshotted when the design is accepted.
+Order rotates with `day_index` unless `rotate` is false. The first canvas is Claude → Grok Artist → OpenAI. The order is snapshotted when the design is accepted.
+
+Canvases are sessions, not one row per New York date. A realtime 08:00 tick archives whatever session was in progress and opens a blank one awaiting design. `POST /host/canvas/new` opens a bonus session on the current clock so back-to-back runs do not need a fake past date. The gallery and the home page list designed canvases newest first by creation order (`id`), not by `ny_date`. A bonus opened on a pasted-in past date is newer than an earlier real morning if it was created later. Days that were never designed are omitted. Production rows are migrated in place: ids, pixels, and strokes stay, and `ny_date` stops being unique. Nothing is deleted by the migration.
 
 ## Watching a morning
 
@@ -191,13 +197,13 @@ curl -s -X POST http://127.0.0.1:43123/watch/chat \
 pytest -q
 ```
 
-Covers the 08:00–11:00 slice math, uncapped paints (including a full-grid stroke), duplicate collapse, atomic rejects, off-slice and off-hours posts, pass versus `done`, a blank canvas the next morning, the `/watch` canvas rim, PNG nearest-neighbor scaling, reconstructing a canvas from a subset of slices (and the default full view), chatter post and list, and a Blob round-trip with the network mocked.
+Covers the 3-minute slice math, an on-time act opening the next artist, a timeout miss, a late paint rejected with the canvas unchanged, uncapped paints (including a full-grid stroke), duplicate collapse, atomic rejects, off-slice posts, pass versus `done`, a blank canvas the next morning even when today's date already has a canvas, host bonus sessions, the gallery (creation order, never-designed days hidden), `DELETE /host/days/{id}`, the home page, PNG nearest-neighbor scaling, reconstructing a canvas from a subset of slices, chatter, a Blob round-trip, and two writers sharing one blob without dropping a paint.
 
 ## Layout
 
 ```
 app/main.py           FastAPI app (Vercel entrypoint)
-app/schedule.py       08:00–11:00 ET slice clock
+app/schedule.py       08:00 ET slice clock, 3 minutes per slice
 app/store.py          day, ledger, uncapped paint
 app/blob_db.py        Vercel Blob sync for the SQLite file
 app/png.py            nearest-neighbor previews

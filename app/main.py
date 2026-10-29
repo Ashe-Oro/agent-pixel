@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Body, FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from app.config import Settings
 from app.png import render_png
@@ -59,7 +59,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(
         title="Agent Pixel",
         version="1.0.0",
-        summary="A fresh 256×256 pixel mural every morning, painted in 15-minute slices.",
+        summary="A fresh 256×256 pixel mural every morning, painted in 3-minute slices.",
     )
     app.state.store = store
     app.state.settings = settings
@@ -108,8 +108,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
     @app.get("/", include_in_schema=False)
-    def root() -> RedirectResponse:
-        return RedirectResponse("/watch")
+    def root() -> FileResponse:
+        return FileResponse(STATIC)
+
+    @app.get("/canvas/{day_id}", include_in_schema=False)
+    def canvas_page(day_id: int) -> FileResponse:
+        return FileResponse(STATIC)
 
     @app.get("/skill.md")
     def skill_md() -> Response:
@@ -129,6 +133,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/watch/state")
     def watch_state(day_id: int | None = None) -> dict[str, Any]:
         return store.watch_state(day_id=day_id)
+
+    @app.get("/watch/gallery")
+    def watch_gallery() -> dict[str, Any]:
+        return store.gallery()
 
     @app.get("/watch/chat")
     def watch_chat(day_id: int | None = None) -> dict[str, Any]:
@@ -156,6 +164,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def open_day(request: Request) -> dict[str, Any]:
         host_guard(request)
         return store.open_today()
+
+    @app.post("/host/canvas/new")
+    def new_canvas(request: Request) -> dict[str, Any]:
+        host_guard(request)
+        return store.open_bonus()
+
+    @app.delete("/host/days/{day_id}")
+    def delete_day(day_id: int, request: Request, force: bool = False) -> dict[str, Any]:
+        host_guard(request)
+        return store.delete_day(day_id, force=force)
 
     @app.post("/host/routine/tick")
     def routine_tick(request: Request) -> dict[str, Any]:

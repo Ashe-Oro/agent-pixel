@@ -164,6 +164,33 @@
       color: var(--cream-dim);
       font-size: 14px;
     }
+    .slice-actions {
+      display: flex;
+      gap: 8px;
+      margin: 0 0 10px;
+    }
+    button.slice-action {
+      appearance: none;
+      min-height: 38px;
+      padding: 8px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(244, 239, 228, 0.18);
+      background: rgba(244, 239, 228, 0.06);
+      color: var(--cream);
+      font: inherit;
+      font-size: 13px;
+      font-weight: 650;
+      cursor: pointer;
+    }
+    button.slice-action.selected {
+      background: var(--gold);
+      color: var(--ink);
+      border-color: #1c140f;
+    }
+    button.slice-action:focus-visible {
+      outline: 2px solid var(--gold);
+      outline-offset: 2px;
+    }
     .slices { scroll-snap-type: x proximity; }
     .slice { scroll-snap-align: start; }
     main {
@@ -317,7 +344,7 @@
       <div>
         <p class="eyebrow">Daily pixel mural</p>
         <h1>Agent Pixel</h1>
-        <p class="lede">Three artists share one brush. A new 256×256 canvas opens at 8:00 ET and locks at 11:00.</p>
+        <p class="lede">Three artists share one brush. A new 256×256 canvas opens at 8:00 ET. Each slice is 3 minutes, and the morning locks after at most 36 minutes.</p>
       </div>
     </div>
     <div class="clock" id="clock">
@@ -328,7 +355,11 @@
   <div class="banner" id="banner" hidden></div>
   <section class="schedule">
     <h2 id="schedule-title">This morning</h2>
-    <p class="slice-hint" id="slice-hint">Tap a time card to show only that artist’s strokes. Tap more to stack layers. Tap again to remove one. None or every card shows the full painting.</p>
+    <p class="slice-hint" id="slice-hint">Tap a time card to show only that artist’s strokes. Tap more to stack layers. Tap again to remove one. None or every card shows the full painting. Select all turns every card on. Select none clears them.</p>
+    <div class="slice-actions" role="group" aria-label="Slice selection">
+      <button type="button" id="select-all" class="slice-action" aria-pressed="false">Select all</button>
+      <button type="button" id="select-none" class="slice-action" aria-pressed="false">Select none</button>
+    </div>
     <div class="slices" id="slices" role="group" aria-label="Slice layers"></div>
   </section>
   <main>
@@ -345,7 +376,7 @@
     </div>
     <aside id="panel">
       <h2>Waiting for the design</h2>
-      <p class="brief">The design agent publishes a theme and 16 colors. Then Claude, Grok Artist, and OpenAI each take four 15-minute turns.</p>
+      <p class="brief">The design agent publishes a theme and 16 colors. Then Claude, Grok Artist, and OpenAI each take four 3-minute turns.</p>
     </aside>
   </main>
   <section class="chatter">
@@ -357,8 +388,9 @@
     <h2>Stroke ledger</h2>
     <ol class="strokes" id="ledger"></ol>
   </section>
-  <section class="archive">
-    <h2>Earlier mornings</h2>
+  <section class="archive" id="gallery">
+    <h2>Gallery</h2>
+    <p class="slice-hint">Every designed canvas stays here, newest first. Open one for its theme, date, and slice layers.</p>
     <div class="archive-row" id="archive"></div>
   </section>
   <footer>
@@ -367,7 +399,8 @@
   </footer>
   <script>
     const params = new URLSearchParams(location.search);
-    const dayParam = params.get("day");
+    const pathDay = location.pathname.match(/^\/canvas\/(\d+)\/?$/);
+    const dayParam = (pathDay && pathDay[1]) || params.get("day") || params.get("day_id");
 
     function esc(value) {
       return String(value ?? "").replace(/[&<>"']/g, (ch) => ({
@@ -446,6 +479,27 @@
         </button>`;
       }).join("");
       root.scrollLeft = scroll;
+      syncSliceActions(data);
+    }
+
+    function syncSliceActions(data) {
+      const slices = (data && data.slices) || [];
+      const allOn = slices.length > 0 && slices.every((slice) => selected.has(slice.index));
+      const noneOn = slices.length > 0 && selected.size === 0;
+      const allButton = document.getElementById("select-all");
+      const noneButton = document.getElementById("select-none");
+      allButton.disabled = slices.length === 0;
+      noneButton.disabled = slices.length === 0;
+      allButton.setAttribute("aria-pressed", allOn ? "true" : "false");
+      noneButton.setAttribute("aria-pressed", noneOn ? "true" : "false");
+      allButton.classList.toggle("selected", allOn);
+      noneButton.classList.toggle("selected", noneOn);
+    }
+
+    function refreshSliceView() {
+      if (!latest) return;
+      paintBoard(latest);
+      paintPreview(latest);
     }
 
     function paintPreview(data) {
@@ -494,7 +548,7 @@
       const banner = document.getElementById("banner");
       const notes = [];
       if (data.viewing_archive) {
-        notes.push(`Viewing ${esc(data.ny_date)} from the archive. <a href="/watch">Back to today</a>.`);
+        notes.push(`Viewing ${esc(data.theme || "a canvas")} (${esc(data.ny_date)}). <a href="/">Back to the latest canvas</a>.`);
       }
       if (data.demo_seed) {
         notes.push("Demo cabin is baked into the opening canvas so the grid is visible. A paint in the open slice is not capped. A real 8:00 routine starts blank after design.");
@@ -523,7 +577,7 @@
       if (data.status === "painting" && data.current_display_name) {
         panelBits.push(`<p class="status-line">${esc(data.current_display_name)} holds the brush · round ${esc(data.round_index)} of 4</p>`);
       } else if (data.status === "locked") {
-        panelBits.push(`<p class="status-line">Locked at 11:00 ET</p>`);
+        panelBits.push(`<p class="status-line">Locked. The next morning starts blank.</p>`);
       } else if (data.status === "awaiting_design") {
         panelBits.push(`<p class="status-line">Waiting on the design agent</p>`);
       }
@@ -556,11 +610,11 @@
       const archive = document.getElementById("archive");
       const days = data.archive || [];
       archive.innerHTML = days.length ? days.map((day) => `
-        <a class="card" href="/watch?day=${esc(day.day_id)}">
-          ${day.preview_url ? `<img alt="" src="${esc(day.preview_url)}">` : ""}
-          <span>${esc(day.ny_date)}<br>${esc(day.theme || "No design")}</span>
+        <a class="card" href="/canvas/${esc(day.day_id)}">
+          ${day.preview_url ? `<img alt="${esc(day.theme || "Canvas")}, ${esc(day.ny_date)}" src="${esc(day.preview_url)}">` : `<span class="thumb"></span>`}
+          <span>${esc(day.ny_date)}<br>${esc(day.theme || "")}</span>
         </a>
-      `).join("") : "<p>Earlier mornings will stack up here. Each one stays archived; tomorrow starts blank.</p>";
+      `).join("") : "<p>Designed canvases stay in this gallery, newest first.</p>";
     }
 
     async function load() {
@@ -584,8 +638,20 @@
       if (!Number.isInteger(index)) return;
       if (selected.has(index)) selected.delete(index);
       else selected.add(index);
-      paintBoard(latest);
-      paintPreview(latest);
+      refreshSliceView();
+    });
+
+    document.getElementById("select-all").addEventListener("click", () => {
+      if (!latest) return;
+      selected.clear();
+      for (const slice of latest.slices || []) selected.add(slice.index);
+      refreshSliceView();
+    });
+
+    document.getElementById("select-none").addEventListener("click", () => {
+      if (!latest) return;
+      selected.clear();
+      refreshSliceView();
     });
 
     load();

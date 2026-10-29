@@ -5,7 +5,7 @@ from tests.conftest import auth, host, open_design, pin
 
 
 def test_chat_post_list_and_does_not_spend_a_slice(client):
-    opened = open_design(client, "2026-10-28T08:05:00")
+    opened = open_design(client, "2026-10-28T08:00:00")
     day_id = opened["day_id"]
     before = client.get("/watch/chat")
     assert before.status_code == 200
@@ -120,4 +120,8 @@ def test_chat_cap_stays_on_its_day(client):
     today = client.get("/watch/chat").json()
     assert today["day_id"] is None
     assert today["messages"] == []
-    assert client.get("/watch/state").json()["chat"] == []
+    # The home page keeps showing the previous designed canvas until the new morning opens.
+    featured = client.get("/watch/state").json()
+    assert featured["day_id"] == opened["day_id"]
+    assert featured["status"] == "locked"
+    assert featured["chat"][-1]["text"] == "still room"
