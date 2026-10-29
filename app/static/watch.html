@@ -164,6 +164,57 @@
       color: var(--cream-dim);
       font-size: 14px;
     }
+    .slice-bar {
+      display: flex;
+      align-items: stretch;
+      gap: 8px;
+    }
+    .slice-actions {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      flex: none;
+      width: 118px;
+    }
+    .slice-bar .slices {
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+    button.slice-action {
+      appearance: none;
+      flex: 1 1 auto;
+      min-height: 38px;
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: 1px solid rgba(244, 239, 228, 0.18);
+      background: rgba(244, 239, 228, 0.06);
+      color: var(--cream);
+      font: inherit;
+      font-size: 13px;
+      font-weight: 650;
+      line-height: 1.2;
+      text-align: center;
+      cursor: pointer;
+      touch-action: manipulation;
+    }
+    button.slice-action:hover:not(:disabled):not(.selected) {
+      border-color: var(--gold);
+      background: rgba(255, 211, 106, 0.12);
+    }
+    button.slice-action:focus-visible {
+      outline: 2px solid var(--gold);
+      outline-offset: 2px;
+    }
+    button.slice-action:disabled {
+      opacity: 0.45;
+      cursor: default;
+    }
+    button.slice-action.selected {
+      background: var(--gold);
+      color: var(--ink);
+      border-color: #1c140f;
+      box-shadow: inset 0 0 0 2px #1c140f;
+    }
     .slices { scroll-snap-type: x proximity; }
     .slice { scroll-snap-align: start; }
     main {
@@ -304,6 +355,9 @@
       .clock { text-align: left; }
       main { grid-template-columns: 1fr; }
       img.mascot { width: 56px; }
+      .slice-bar { flex-direction: column; }
+      .slice-actions { flex-direction: row; width: auto; }
+      button.slice-action { min-height: 44px; }
     }
     @media (prefers-reduced-motion: reduce) {
       * { scroll-behavior: auto; }
@@ -328,8 +382,14 @@
   <div class="banner" id="banner" hidden></div>
   <section class="schedule">
     <h2 id="schedule-title">This morning</h2>
-    <p class="slice-hint" id="slice-hint">Tap a time card to show only that artist’s strokes. Tap more to stack layers. Tap again to remove one. None or every card shows the full painting.</p>
-    <div class="slices" id="slices" role="group" aria-label="Slice layers"></div>
+    <p class="slice-hint" id="slice-hint">Tap a time card to show only that artist’s strokes. Tap more to stack layers. Tap again to remove one. None or every card shows the full painting. Select all turns every card on. Select none clears them.</p>
+    <div class="slice-bar">
+      <div class="slice-actions" role="group" aria-label="Slice selection">
+        <button type="button" id="select-all" class="slice-action" aria-pressed="false" disabled>Select all</button>
+        <button type="button" id="select-none" class="slice-action" aria-pressed="false" disabled>Select none</button>
+      </div>
+      <div class="slices" id="slices" role="group" aria-label="Slice layers"></div>
+    </div>
   </section>
   <main>
     <div class="stage">
@@ -446,6 +506,21 @@
         </button>`;
       }).join("");
       root.scrollLeft = scroll;
+      syncSliceActions(data);
+    }
+
+    function syncSliceActions(data) {
+      const slices = (data && data.slices) || [];
+      const allOn = slices.length > 0 && slices.every((slice) => selected.has(slice.index));
+      const noneOn = slices.length > 0 && slices.every((slice) => !selected.has(slice.index));
+      const allButton = document.getElementById("select-all");
+      const noneButton = document.getElementById("select-none");
+      allButton.disabled = slices.length === 0;
+      noneButton.disabled = slices.length === 0;
+      allButton.setAttribute("aria-pressed", allOn ? "true" : "false");
+      noneButton.setAttribute("aria-pressed", noneOn ? "true" : "false");
+      allButton.classList.toggle("selected", allOn);
+      noneButton.classList.toggle("selected", noneOn);
     }
 
     function paintPreview(data) {
@@ -577,6 +652,12 @@
       }
     }
 
+    function refreshSliceView() {
+      if (!latest) return;
+      paintBoard(latest);
+      paintPreview(latest);
+    }
+
     document.getElementById("slices").addEventListener("click", (event) => {
       const button = event.target.closest("button[data-index]");
       if (!button || !latest) return;
@@ -584,8 +665,20 @@
       if (!Number.isInteger(index)) return;
       if (selected.has(index)) selected.delete(index);
       else selected.add(index);
-      paintBoard(latest);
-      paintPreview(latest);
+      refreshSliceView();
+    });
+
+    document.getElementById("select-all").addEventListener("click", () => {
+      if (!latest) return;
+      selected.clear();
+      for (const slice of latest.slices || []) selected.add(slice.index);
+      refreshSliceView();
+    });
+
+    document.getElementById("select-none").addEventListener("click", () => {
+      if (!latest) return;
+      selected.clear();
+      refreshSliceView();
     });
 
     load();
