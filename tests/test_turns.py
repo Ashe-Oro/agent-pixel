@@ -55,6 +55,44 @@ def test_pass_done_skips_remaining_rounds(client):
     assert grok["round_index"] == 1
 
 
+def test_missed_slice_does_not_block_a_later_slice(client):
+    """Day 16: Grok missed slice index 7, then every later Grok slice was refused.
+
+    Missing slice k must still allow the seat to paint slice k+3, and turn must
+    agree with act both while the missed slice is the one that just closed and
+    when the seat's next slice is open.
+    """
+    open_design(client, "2026-10-28T08:00:00")
+    passed = client.post("/agent/act", headers=auth("claude"), json={"type": "pass"})
+    assert passed.status_code == 200, passed.text
+    pin(client, "2026-10-28T08:03:00")
+    grok_closed = client.get("/agent/turn", headers=auth("grok-artist")).json()
+    assert grok_closed["to_act"] is False
+    assert grok_closed["slice_index"] == 2
+    late = client.post(
+        "/agent/act",
+        headers=auth("grok-artist"),
+        json={"type": "paint", "pixels": [{"x": 1, "y": 1, "color": 2}]},
+    )
+    assert late.status_code == 409
+    assert late.json()["error"] == "slice_missed"
+    openai = client.get("/agent/turn", headers=auth("openai")).json()
+    assert openai["to_act"] is True
+    assert client.post("/agent/act", headers=auth("openai"), json={"type": "pass"}).status_code == 200
+    assert client.post("/agent/act", headers=auth("claude"), json={"type": "pass"}).status_code == 200
+    grok_next = client.get("/agent/turn", headers=auth("grok-artist")).json()
+    assert grok_next["to_act"] is True
+    assert grok_next["slice_index"] == 4
+    painted = client.post(
+        "/agent/act",
+        headers=auth("grok-artist"),
+        json={"type": "paint", "pixels": [{"x": 4, "y": 4, "color": 6}], "note": "back on the next slice"},
+    )
+    assert painted.status_code == 200, painted.text
+    assert painted.json()["slice_index"] == 4
+    assert client.get("/agent/turn", headers=auth("grok-artist")).json()["to_act"] is False
+
+
 def test_missed_slice_does_not_roll_the_turn_forward(client):
     open_design(client, "2026-10-28T08:00:00")
     pin(client, "2026-10-28T08:03:00")
