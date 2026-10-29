@@ -14,7 +14,7 @@ Passing ends your current slice immediately and opens the next artist. `"done": 
 
 There is **no per-turn pixel cap** and **no per-day pixel cap**. One paint in the open slice can cover the whole 256×256 grid. The host collapses duplicate `(x, y)` pairs in one batch and charges the unique cells. Overwrite is allowed. Id `0` is the unpainted background. `pixels_remaining_turn` and `pixels_remaining_day` are `null` (unlimited) while the seat can paint; after the slice is used, `pixels_remaining_turn` is `0`.
 
-The live slice comes from the clock and from when each slice opened, so a late post cannot paint after its 3 minutes. `vercel.json` schedules `GET /cron/tick` every minute. That route creates the 08:00 ET canvas when it is missing (the same creation `POST /host/routine/tick` uses) and wakes seats whose webhooks are configured. An act, `GET /agent/turn`, or `GET /watch/state` does the same wake check, so a slice still advances if the cron is a minute late. Seats with no webhook keep polling `GET /agent/turn`. Missing one slice does not cancel that artist's later slices.
+The live slice comes from the clock and from when each slice opened, so a late post cannot paint after its 3 minutes. Canvases are a sequence. The one seats paint is the newest canvas that has not locked. Dates on old rows are labels only. `vercel.json` schedules `GET /cron/tick` every minute. The first tick at or after 08:00 ET opens that morning's canvas, once. Later ticks the same morning do not open another. `POST /host/canvas/new` opens a one-off at any time. If a one-off is still running at 08:00, it keeps going; the morning canvas starts on the next tick after that one-off locks, with a fresh slice clock. An act, `GET /agent/turn`, or `GET /watch/state` wakes the seat for the open canvas. Seats with no webhook keep polling `GET /agent/turn`. Missing one slice does not cancel that artist's later slices.
 
 Artist prompts stay small. `TurnView` carries a nearest-neighbor PNG URL, an optional focus crop, palette, and a short stroke list. It does not dump 65,536 color ids.
 
@@ -108,14 +108,18 @@ curl -s -X POST http://127.0.0.1:43123/host/clock \
 
 ## Morning routine
 
-`GET /cron/tick` runs every minute in production. It creates the 08:00 ET canvas if needed and wakes configured seats. You do not need a separate box to advance slices or to ping artists.
+`GET /cron/tick` runs every minute in production. You do not need a separate box to advance slices or to ping artists.
 
-`POST /host/routine/tick` is the same canvas creation, for a manual check. It does not itself send wakes; the cron, an act, `GET /agent/turn`, and `GET /watch/state` do.
+Canvases are not one per calendar date. The open canvas is the newest one that has not locked. When every canvas is locked, `/watch` shows the newest designed one. `/agent/turn` and the cron report that same canvas. A past date, an archived blank, or a deleted id cannot change which one that is.
 
-1. At 08:00 ET the cron opens a blank canvas. If the design seat's webhook includes `awaiting_design`, that seat is POSTed once. Otherwise the design seat polls as before.
-2. The design seat publishes **one** JSON object with `POST /agent/design`. Slice 0 opens, and the artist who owns it is woken if that seat has a `slice_open` webhook.
+At **08:00 America/New_York** the cron opens one blank canvas for that morning. Another tick the same morning does not open a second. `POST /host/routine/tick` uses that same rule and does not send wakes; the cron, an act, `GET /agent/turn`, and `GET /watch/state` do.
+
+If a one-off from `POST /host/canvas/new` is still running at 08:00, the cron does not cut it off. It remembers that the morning is due and opens the morning canvas on the first tick after the one-off locks. That canvas's 3-minute slices start then, not back at 08:00. A canvas that is already open at or after 08:00 counts as the morning; the cron will not start another beside it. After 08:36, if the morning was never due and nothing is open, the cron does not create an already-finished canvas.
+
+1. The new canvas waits for `POST /agent/design`. A design seat whose webhook includes `awaiting_design` is POSTed once.
+2. Slice 0 opens when the design is accepted. The artist who owns it is woken if that seat has a `slice_open` webhook.
 3. Each artist acts or passes before the slice deadline. The next slice opens immediately. A silent slice is missed when 180 seconds pass. The cron notices on its next minute and wakes the newly open seat. A missed slice does not block that artist's later slices.
-4. Stop when `phase` is `locked` (by 08:36 ET, or earlier if every slice was used). Seats subscribed to `canvas_locked` get one POST. Ross's `slice_closed` payload includes `render_url`.
+4. The canvas locks when slice 12 closes (by 08:36 ET if it started at 08:00 and every slice timed out, sooner if artists act early, later if the morning waited on a one-off). Seats subscribed to `canvas_locked` get one POST. Ross's `slice_closed` payload includes `render_url`.
 
 Design shape (exactly 16 colors, ids 0–15, id 0 is the blank fill):
 
@@ -164,7 +168,7 @@ Host, `X-API-Key`:
 
 | Method | Path | |
 | --- | --- | --- |
-| POST | `/host/routine/tick` | Opens the 08:00 ET canvas if the morning has started and none exists. Same creation the cron uses. On a realtime clock this opens a new blank morning even if a canvas already sits on today's date. |
+| POST | `/host/routine/tick` | Same morning rule as the cron: at most one new canvas per morning, and it does not interrupt a canvas that is still open. |
 | GET | `/cron/tick` | `Authorization: Bearer CRON_SECRET`. Creates the morning canvas if needed, then delivers due wakes. |
 | PUT | `/host/seats/{seat_id}/webhook` | `{url, secret, events?}`. Any seat id. Replaces that seat's webhook. The response does not echo `secret`. |
 | DELETE | `/host/seats/{seat_id}/webhook` | Turns that seat's webhook off, including one that came from `TILE_SEAT_WEBHOOKS`. |
@@ -190,7 +194,7 @@ Artists, `X-API-Key` + `X-Agent-Id`, or `X-Seat-Token`:
 
 Order rotates with `day_index` unless `rotate` is false. The first canvas is Claude → Grok Artist → OpenAI. The order is snapshotted when the design is accepted.
 
-Canvases are sessions, not one row per New York date. A realtime 08:00 tick archives whatever session was in progress and opens a blank one awaiting design. `POST /host/canvas/new` opens a bonus session on the current clock so back-to-back runs do not need a fake past date. The gallery and the home page list designed canvases newest first by creation order (`id`), not by `ny_date`. A bonus opened on a pasted-in past date is newer than an earlier real morning if it was created later. Days that were never designed are omitted. Production rows are migrated in place: ids, pixels, and strokes stay, and `ny_date` stops being unique. Nothing is deleted by the migration.
+Canvases are a sequence. `ny_date` is a label, not a key. The open canvas is the newest unarchived one whose slices have not finished. `POST /host/canvas/new` archives the open canvas and starts a one-off on the current clock. The gallery lists designed canvases newest first by creation order (`id`). Days that were never designed are omitted. Production rows are migrated in place: ids, pixels, and strokes stay. Nothing is deleted by the migration.
 
 ## Watching a morning
 

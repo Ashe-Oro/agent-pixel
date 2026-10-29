@@ -58,7 +58,6 @@ from app.schedule import (
 )
 
 KIND_MORNING = "morning"
-KIND_PINNED = "pinned"
 KIND_BONUS = "bonus"
 KIND_LEGACY = "legacy"
 
@@ -295,7 +294,9 @@ class Store:
               roster_json TEXT NOT NULL,
               rotate INTEGER NOT NULL DEFAULT 1,
               pixels_per_turn INTEGER NOT NULL DEFAULT 0,
-              pixels_per_artist_day INTEGER NOT NULL DEFAULT 0
+              pixels_per_artist_day INTEGER NOT NULL DEFAULT 0,
+              morning_opened TEXT,
+              morning_due TEXT
             );
             CREATE TABLE IF NOT EXISTS days (
 """ + _DAYS_COLUMNS + """
@@ -342,6 +343,7 @@ class Store:
                 """,
                 (json.dumps(list(ARTISTS)),),
             )
+        self._ensure_settings_columns()
         # 0 means unlimited. Rows created with the old 64 / 256 caps would
         # still block a full-grid stroke, so clear them on open.
         cleared = self.conn.execute(
@@ -359,6 +361,14 @@ class Store:
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS days_live ON days (kind, archived, ny_date, id)"
             )
+
+    def _ensure_settings_columns(self) -> None:
+        cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(settings)")}
+        for name in ("morning_opened", "morning_due"):
+            if name in cols:
+                continue
+            self.conn.execute(f"ALTER TABLE settings ADD COLUMN {name} TEXT")
+            self.dirty = True
 
     def _migrate_days(self) -> None:
         """Rebuild days when ny_date is still unique, keeping every row.
@@ -629,104 +639,94 @@ class Store:
         if cur.rowcount:
             self.dirty = True
 
-    def _morning_row(self, key: str, *, include_archived: bool) -> sqlite3.Row | None:
-        if include_archived:
-            return self.conn.execute(
-                """
-                SELECT * FROM days WHERE ny_date = ? AND kind = ?
-                ORDER BY id DESC LIMIT 1
-                """,
-                (key, KIND_MORNING),
-            ).fetchone()
-        return self.conn.execute(
-            """
-            SELECT * FROM days
-            WHERE ny_date = ? AND kind = ? AND archived = 0
-            ORDER BY id DESC LIMIT 1
-            """,
-            (key, KIND_MORNING),
-        ).fetchone()
+    def _active_canvas(self, now: datetime) -> sqlite3.Row | None:
+        """Newest canvas that is still open. Calendar dates are not consulted.
 
-    def _calendar_row(self, key: str) -> sqlite3.Row | None:
-        """Newest unarchived canvas for a pinned date, other than a bonus session."""
-        return self.conn.execute(
-            """
-            SELECT * FROM days
-            WHERE ny_date = ? AND archived = 0 AND kind != ?
-            ORDER BY id DESC LIMIT 1
-            """,
-            (key, KIND_BONUS),
-        ).fetchone()
-
-    def _live_bonus(self, now: datetime) -> sqlite3.Row | None:
-        row = self.conn.execute(
-            """
-            SELECT * FROM days WHERE kind = ? AND archived = 0
-            ORDER BY id DESC LIMIT 1
-            """,
-            (KIND_BONUS,),
-        ).fetchone()
-        if row is None:
-            return None
-        phase, _ = self._phase_for(row, now)
-        if phase == "after":
-            return None
-        return row
+        Locked and archived rows are skipped, so a newer finished canvas does
+        not hide an older one that is still running, and a past-dated or
+        archived row cannot become the one seats paint.
+        """
+        rows = self.conn.execute(
+            "SELECT * FROM days WHERE archived = 0 ORDER BY id DESC"
+        ).fetchall()
+        for row in rows:
+            phase, _ = self._phase_for(row, now)
+            if phase != "after":
+                return row
+        return None
 
     def today_row(self) -> sqlite3.Row | None:
-        """The canvas seats paint. None until this morning or a bonus is open."""
-        now = self.now()
-        if self._clock_pinned():
-            bonus = self._live_bonus(now)
-            if bonus is not None:
-                return bonus
-            return self._calendar_row(ny_date(now))
-        morning = self._morning_row(ny_date(now), include_archived=False)
-        if morning is not None:
-            return morning
-        return self._live_bonus(now)
+        """The canvas seats paint: the newest one that has not locked."""
+        return self._active_canvas(self.now())
 
-    def _ensure_morning(self, now: datetime) -> sqlite3.Row:
+    def _latest_unarchived(self) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM days WHERE archived = 0 ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+
+    def _mark_morning(self, *, opened: str | None = None, due: str | None = None, clear_due: bool = False) -> None:
+        sets: list[str] = []
+        params: list[str] = []
+        if opened is not None:
+            sets.append("morning_opened = ?")
+            params.append(opened)
+        if due is not None:
+            sets.append("morning_due = ?")
+            params.append(due)
+        if clear_due:
+            sets.append("morning_due = NULL")
+        if not sets:
+            return
+        self.conn.execute(f"UPDATE settings SET {', '.join(sets)} WHERE id = 1", params)
+        self.dirty = True
+
+    def _start_scheduled_morning(self, now: datetime) -> None:
+        """Open at most one morning canvas per New York date.
+
+        A canvas still running from before 08:00 is left alone. The morning
+        canvas is created on a later tick, once that canvas has locked, and
+        its slice clock starts then so it is not born already half over.
+        A canvas already open at or after 08:00 counts as this morning: the
+        cron does not start a second one. After 08:36, with nothing waiting,
+        no already-locked canvas is minted.
+        """
+        start, lock = day_bounds(now.astimezone(NY).date())
+        if now < start:
+            return
         key = ny_date(now)
-        existing = self._morning_row(key, include_archived=True)
-        if existing is not None:
-            return existing
-        self._archive_open(now)
-        opens, _ = day_bounds(now.astimezone(NY).date())
-        return self._insert_day(now, KIND_MORNING, opens)
+        settings = self._settings()
+        if settings["morning_opened"] == key:
+            return
+        active = self._active_canvas(now)
+        if active is not None:
+            if self._opens_at(active) >= start:
+                self._mark_morning(opened=key, clear_due=True)
+                return
+            if settings["morning_due"] != key:
+                self._mark_morning(due=key)
+            return
+        if now >= lock and settings["morning_due"] != key:
+            return
+        opens = now if settings["morning_due"] == key else start
+        self._insert_day(now, KIND_MORNING, opens)
+        self._mark_morning(opened=key, clear_due=True)
 
     def _ensure_today(self, now: datetime) -> sqlite3.Row:
-        if not self._clock_pinned():
+        self._start_scheduled_morning(now)
+        day = self._active_canvas(now)
+        if day is None:
             phase, _ = position(now)
             if phase == "before":
-                existing = self._morning_row(ny_date(now), include_archived=False)
-                if existing is not None:
-                    return existing
                 raise ApiError(409, "before_routine", "The morning opens at 08:00 America/New_York.")
-            return self._ensure_morning(now)
-        bonus = self._live_bonus(now)
-        if bonus is not None:
-            return bonus
-        existing = self._calendar_row(ny_date(now))
-        if existing is not None:
-            return existing
-        opens, _ = day_bounds(now.astimezone(NY).date())
-        return self._insert_day(now, KIND_PINNED, opens)
+            raise ApiError(409, "morning_locked", "This session is locked.")
+        return day
 
     def open_today(self) -> dict[str, Any]:
-        def mutate() -> int | None:
-            now = self.now()
-            if not self._clock_pinned() and position(now)[0] == "before":
-                current = self.today_row()
-                return current["id"] if current is not None else None
-            try:
-                day = self._ensure_today(now)
-            except ApiError:
-                return None
-            return day["id"]
+        def mutate() -> None:
+            self._start_scheduled_morning(self.now())
 
-        day_id = self._run_write(mutate)
-        return self.watch_state(day_id=day_id)
+        self._run_write(mutate)
+        return self.watch_state()
 
     def open_bonus(self) -> dict[str, Any]:
         """Open a fresh 12-slice session at the current clock, without moving the date."""
@@ -785,10 +785,6 @@ class Store:
             self._refresh()
             now = self.now()
             day = self.today_row()
-            if day is None and not self._clock_pinned():
-                parked = self._morning_row(ny_date(now), include_archived=True)
-                if parked is not None and int(parked["archived"]):
-                    day = parked
             phase, _ = self._phase_for(day, now)
             designed = bool(day and day["theme"])
             to_act = phase == "during" and not designed
@@ -823,12 +819,13 @@ class Store:
                 now = self.now()
                 day = self.today_row()
                 if day is None:
+                    self._start_scheduled_morning(now)
+                    day = self._active_canvas(now)
+                if day is None:
                     phase, _ = position(now)
                     if phase == "before":
                         raise ApiError(409, "before_routine", "Design opens at 08:00 America/New_York.")
-                    if phase == "after":
-                        raise ApiError(409, "morning_locked", "This session is locked.")
-                    day = self._ensure_today(now)
+                    raise ApiError(409, "morning_locked", "This session is locked.")
                 phase, index = self._phase_for(day, now)
                 if phase == "before":
                     raise ApiError(409, "before_routine", "Design opens at 08:00 America/New_York.")
@@ -904,6 +901,9 @@ class Store:
                 now = self.now()
                 day = self.today_row()
                 if day is None:
+                    latest = self._latest_unarchived()
+                    if latest is not None and self._phase_for(latest, now)[0] == "after":
+                        raise ApiError(409, "morning_locked", "The brush is closed.")
                     raise ApiError(409, "no_day", "Today's canvas is not open yet.")
                 if not day["theme"]:
                     raise ApiError(409, "awaiting_design", "The design agent has not opened the canvas.")
@@ -1057,6 +1057,9 @@ class Store:
             self._refresh()
             now = self.now()
             day = self.today_row()
+            if day is None:
+                designed = self._designed_rows()
+                day = designed[0] if designed else None
             view = self._turn_from(day, agent_id, now)
         self._dispatch_quietly()
         return view
@@ -1141,42 +1144,39 @@ class Store:
         }
 
     def routine_tick(self) -> dict[str, Any]:
-        saved: dict[str, Any] = {}
+        """Start this morning's canvas if it is due, then report the same canvas the watch page shows."""
 
         def mutate() -> None:
-            now = self.now()
-            pinned = self._clock_pinned()
-            phase, _ = position(now)
-            if not pinned and phase != "before":
-                day = self._ensure_morning(now)
-                if int(day["archived"]):
-                    bonus = self._live_bonus(now)
-                    if bonus is not None:
-                        day = bonus
-                saved["day_id"] = day["id"]
-                return
-            bonus = self._live_bonus(now)
-            if bonus is not None:
-                saved["day_id"] = bonus["id"]
-                return
-            if phase == "before":
-                saved["before"] = True
-                return
-            day = self._ensure_today(now)
-            saved["day_id"] = day["id"]
+            self._start_scheduled_morning(self.now())
 
         self._run_write(mutate)
-        now = self.now()
-        if saved.get("before"):
+        with self.lock:
+            self._refresh()
+            now = self.now()
+            featured = self._default_feature(now)
+            if featured is not None:
+                return self._tick_payload(featured, now)
+            phase, _ = position(now)
+            if phase == "before":
+                return {
+                    "ok": True,
+                    "phase": "before_open",
+                    "ny_now": now.astimezone(NY).isoformat(),
+                    "ny_label": label_clock(now),
+                    "hint": "Wait until 08:00 America/New_York, then tick again and post a design.",
+                    "day": None,
+                }
             return {
                 "ok": True,
-                "phase": "before_open",
+                "phase": "locked",
                 "ny_now": now.astimezone(NY).isoformat(),
                 "ny_label": label_clock(now),
-                "hint": "Wait until 08:00 America/New_York, then tick again and post a design.",
+                "slice_index": None,
+                "round_index": None,
+                "current_agent_id": None,
+                "hint": "The morning window has passed and no canvas is open.",
                 "day": None,
             }
-        return self._tick_payload(self.day_by_id(saved["day_id"]), now)
 
     def cron_tick(self) -> dict[str, Any]:
         """Create today's canvas if the morning is open, then deliver due wakes.
@@ -1226,6 +1226,10 @@ class Store:
             return []
         now = self.now()
         day = self.today_row()
+        if day is None:
+            # The canvas that just locked is no longer "open", but reviewers
+            # still get slice_closed / canvas_locked during the short grace.
+            day = self._latest_unarchived()
         if day is None or int(day["archived"]):
             return []
         clock = self._session_clock(day, now)

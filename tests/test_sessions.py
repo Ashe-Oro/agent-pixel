@@ -72,7 +72,7 @@ def test_timeout_misses_the_slice_and_late_paint_is_rejected(client):
     ).json()["cells"] == [7]
 
 
-def test_realtime_morning_ignores_a_canvas_already_on_today(client):
+def test_next_morning_opens_one_new_canvas_after_a_finished_one(client):
     pin(client, "2026-10-30T08:00:00")
     design = dict(DESIGN)
     design["theme"] = "Harbor lighthouse at blue hour"
@@ -86,7 +86,8 @@ def test_realtime_morning_ignores_a_canvas_already_on_today(client):
     )
     assert painted.status_code == 200, painted.text
     assert client.post("/host/clock", headers=host(), json={"mode": "realtime"}).status_code == 200
-    frozen = datetime(2026, 10, 30, 12, 0, tzinfo=timezone.utc)
+    # 12:00 UTC on Oct 31 2026 is 08:00 EDT. Yesterday's canvas is locked.
+    frozen = datetime(2026, 10, 31, 12, 0, tzinfo=timezone.utc)
 
     class FrozenDateTime(datetime):
         @classmethod
@@ -97,7 +98,8 @@ def test_realtime_morning_ignores_a_canvas_already_on_today(client):
 
     with patch("app.store.datetime", FrozenDateTime):
         before = client.get("/watch/state").json()
-        assert before["day_id"] != old_id or before["status"] == "locked"
+        assert before["day_id"] == old_id
+        assert before["status"] == "locked"
         tick = client.post("/host/routine/tick", headers=host())
         assert tick.status_code == 200, tick.text
         body = tick.json()
@@ -106,6 +108,7 @@ def test_realtime_morning_ignores_a_canvas_already_on_today(client):
         assert body["day"]["theme"] is None
         again = client.post("/host/routine/tick", headers=host()).json()
         assert again["day"]["day_id"] == body["day"]["day_id"]
+        assert client.get("/watch/state").json()["day_id"] == body["day"]["day_id"]
     old = client.get(
         f"/host/days/{old_id}/region",
         params={"x": 10, "y": 12, "w": 1, "h": 1},
@@ -113,7 +116,6 @@ def test_realtime_morning_ignores_a_canvas_already_on_today(client):
     )
     assert old.json()["cells"] == [6]
     gallery = client.get("/watch/gallery").json()["canvases"]
-    assert gallery[0]["day_id"] != old_id or any(item["day_id"] == old_id and item["theme"] for item in gallery)
     assert any(item["day_id"] == old_id and item["theme"] == "Harbor lighthouse at blue hour" for item in gallery)
 
 
