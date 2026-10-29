@@ -24,8 +24,10 @@ DISPLAY = {
     "openai": "OpenAI",
 }
 SLICE_COUNT = ROUNDS * len(ARTISTS)  # 12
-PIXELS_PER_TURN = 64
-PIXELS_PER_ARTIST_DAY = 256  # 4 turns × 64
+# None means unlimited. A paint in an open slice may cover every cell of the
+# grid. Settings still store 0 for these so older 64 / 256 rows can be cleared.
+PIXELS_PER_TURN = None
+PIXELS_PER_ARTIST_DAY = None
 GRID = 256
 
 DEFAULT_ROSTER = list(ARTISTS)

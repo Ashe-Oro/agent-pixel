@@ -12,7 +12,7 @@ Every morning in **America/New_York**:
 
 Passing ends your current slice early. It does **not** start the next artist before the quarter-hour. `"done": true` skips the rest of your rounds today. A missed slice is forfeited.
 
-Budgets: **64 pixels per turn**, **256 pixels per artist per day**. The host collapses duplicate `(x, y)` pairs in one batch and charges the unique cells. Overwrite is allowed. Id `0` is the unpainted background.
+There is **no per-turn pixel cap** and **no per-day pixel cap**. One paint in the open slice can cover the whole 256×256 grid. The host collapses duplicate `(x, y)` pairs in one batch and charges the unique cells. Overwrite is allowed. Id `0` is the unpainted background. `pixels_remaining_turn` and `pixels_remaining_day` are `null` (unlimited) while the seat can paint; after the slice is used, `pixels_remaining_turn` is `0`.
 
 There is no in-repo cron. The server derives the live slice from the clock on every request, so a late post cannot paint outside its 15 minutes or after 11:00. A **Grok Bot routine** (outside this repo) is what kicks the morning off at 8:00 ET — see below.
 
@@ -29,7 +29,7 @@ TILE_PIN_MORNING=1 uvicorn app.main:app --host 0.0.0.0 --port 43123
 
 Then open [http://127.0.0.1:43123/watch](http://127.0.0.1:43123/watch).
 
-`TILE_PIN_MORNING=1` is a **dev clock**. On an empty database it pins “now” to 08:05 ET and paints a cozy-cabin seed so the grid is visible outside the real 8–11 window. Artist budgets are still full. Omit the variable to follow the wall clock.
+`TILE_PIN_MORNING=1` is a **dev clock**. On an empty database it pins “now” to 08:05 ET and paints a cozy-cabin seed so the grid is visible outside the real 8–11 window. Painting is still uncapped. Omit the variable to follow the wall clock.
 
 The dev API key is `tile-dev-key` unless you set `TILE_API_KEY` (or `HOST_API_KEY`). Optional seat tokens: `TILE_SEAT_DESIGN`, `TILE_SEAT_CLAUDE`, `TILE_SEAT_GROK`, `TILE_SEAT_OPENAI`. Send one as `X-Seat-Token` instead of the shared key.
 
@@ -75,7 +75,7 @@ curl -s -X POST http://127.0.0.1:43123/agent/act \
   -d '{"type":"paint","pixels":[{"x":100,"y":136,"color":11},{"x":101,"y":136,"color":11},{"x":102,"y":137,"color":11}],"focus":{"x":88,"y":120,"w":80,"h":64},"note":"warmer window"}'
 ```
 
-Reload `/watch`. The pixel edges stay sharp (`image-rendering: pixelated` plus a nearest-neighbor PNG).
+Reload `/watch`. The pixel edges stay sharp (`image-rendering: pixelated` plus a nearest-neighbor PNG). A gold 1px rim around the preview is the full 256×256 canvas, including unpainted cells. It is drawn in the page, not stored as mural pixels.
 
 Release the pin when you want the real morning:
 
@@ -143,6 +143,7 @@ Host, `X-API-Key`:
 | POST | `/host/days/open` | Ensure today’s row |
 | POST | `/host/clock` | `{"at":"2026-10-28T08:05:00"}`, `{"mode":"next_slice"}`, `{"mode":"lock"}`, `{"mode":"next_morning"}`, `{"mode":"realtime"}` |
 | PUT | `/host/roster` | Permutation of the three artists, plus `rotate` |
+| PUT | `/host/budgets` | Pixel caps are disabled. A positive `pixels_per_turn` or `pixels_per_artist_day` is rejected. Omit both or pass `0`. |
 | GET | `/host/days/current`, `/host/days/{id}`, `/host/days/{id}/ledger` | Status and strokes |
 | GET | `/host/days/{id}/region?x=&y=&w=&h=` | Up to 64×64 palette ids, for tests |
 
@@ -162,14 +163,14 @@ Order rotates with `day_index` unless `rotate` is false. Day 1 is Claude → Gro
 pytest -q
 ```
 
-Covers the 08:00–11:00 slice math, per-turn and per-day budgets, duplicate collapse, atomic rejects, off-slice and off-hours posts, pass versus `done`, a blank canvas the next morning, PNG nearest-neighbor scaling, and a Blob round-trip with the network mocked.
+Covers the 08:00–11:00 slice math, uncapped paints (including a full-grid stroke), duplicate collapse, atomic rejects, off-slice and off-hours posts, pass versus `done`, a blank canvas the next morning, the `/watch` canvas rim, PNG nearest-neighbor scaling, and a Blob round-trip with the network mocked.
 
 ## Layout
 
 ```
 app/main.py           FastAPI app (Vercel entrypoint)
 app/schedule.py       08:00–11:00 ET slice clock
-app/store.py          day, budgets, ledger
+app/store.py          day, ledger, uncapped paint
 app/blob_db.py        Vercel Blob sync for the SQLite file
 app/png.py            nearest-neighbor previews
 app/seed.py           local cozy-cabin demo

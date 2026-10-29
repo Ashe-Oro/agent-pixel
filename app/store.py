@@ -31,6 +31,10 @@ from app.schedule import (
     round_on_slice,
     slice_window,
 )
+
+# Latest-stroke cells stay in TurnView only while the list is small.
+# A full-canvas paint is the preview PNG, not 65,536 coordinates in the prompt.
+TURN_VIEW_INLINE_PIXELS = 512
 from app.seed import COZY_BRIEF, COZY_PALETTE, COZY_THEME, blank_canvas, draw_cabin
 
 KNOWN_AGENTS = ("design",) + ARTISTS
@@ -65,6 +69,7 @@ class Store:
         self._init_schema()
         if self.remote and not downloaded:
             self.dirty = True
+        if self.remote and self.dirty:
             self._flush()
 
     def close(self) -> None:
@@ -121,6 +126,8 @@ class Store:
         self.etag = etag
         self._connect()
         self._init_schema()
+        if self.dirty:
+            self._flush()
 
     def _flush(self) -> None:
         if not self.remote or not self.dirty:
@@ -140,8 +147,8 @@ class Store:
               clock_utc TEXT,
               roster_json TEXT NOT NULL,
               rotate INTEGER NOT NULL DEFAULT 1,
-              pixels_per_turn INTEGER NOT NULL DEFAULT 64,
-              pixels_per_artist_day INTEGER NOT NULL DEFAULT 256
+              pixels_per_turn INTEGER NOT NULL DEFAULT 0,
+              pixels_per_artist_day INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS days (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -186,10 +193,21 @@ class Store:
             self.conn.execute(
                 """
                 INSERT INTO settings (id, roster_json, rotate, pixels_per_turn, pixels_per_artist_day)
-                VALUES (1, ?, 1, ?, ?)
+                VALUES (1, ?, 1, 0, 0)
                 """,
-                (json.dumps(list(ARTISTS)), PIXELS_PER_TURN, PIXELS_PER_ARTIST_DAY),
+                (json.dumps(list(ARTISTS)),),
             )
+        # 0 means unlimited. Rows created with the old 64 / 256 caps would
+        # still block a full-grid stroke, so clear them on open.
+        cleared = self.conn.execute(
+            """
+            UPDATE settings
+            SET pixels_per_turn = 0, pixels_per_artist_day = 0
+            WHERE id = 1 AND (pixels_per_turn != 0 OR pixels_per_artist_day != 0)
+            """
+        )
+        if cleared.rowcount:
+            self.dirty = True
 
     # --- clock -------------------------------------------------------------
 
@@ -318,18 +336,16 @@ class Store:
             self._flush()
         return {"order": order, "rotate": rotate}
 
-    def set_budgets(self, per_turn: int, per_day: int) -> dict[str, Any]:
-        if per_turn < 1 or per_day < per_turn or per_turn > 4096 or per_day > 100000:
-            raise ApiError(400, "bad_budget", "Budget must be at least 1 and day >= turn.")
+    def set_budgets(self) -> dict[str, Any]:
+        """Pixel caps stay off. Stored 0 is the unlimited sentinel, not a budget of zero."""
         with self.lock:
             self._refresh()
             self.conn.execute(
-                "UPDATE settings SET pixels_per_turn = ?, pixels_per_artist_day = ? WHERE id = 1",
-                (per_turn, per_day),
+                "UPDATE settings SET pixels_per_turn = 0, pixels_per_artist_day = 0 WHERE id = 1"
             )
             self.dirty = True
             self._flush()
-        return {"pixels_per_turn": per_turn, "pixels_per_artist_day": per_day}
+        return {"pixels_per_turn": PIXELS_PER_TURN, "pixels_per_artist_day": PIXELS_PER_ARTIST_DAY}
 
     # --- design / act ------------------------------------------------------
 
@@ -446,23 +462,12 @@ class Store:
                 phase, index = position(now)
                 if index is None or phase != "during":
                     raise ApiError(409, "morning_locked", "The brush is closed.")
-                order = json.loads(day["artist_order_json"])
-                settings = self._settings()
-                used = self._pixels_used(day["id"], agent_id)
-                day_left = int(settings["pixels_per_artist_day"]) - used
-                turn_left = min(int(settings["pixels_per_turn"]), day_left)
                 focus = None
                 charged = 0
                 pixels_out: list[dict[str, int]] = []
                 done = False
                 if action == "paint":
                     raw = _parse_pixels(payload.get("pixels"))
-                    if len(raw) > turn_left:
-                        raise ApiError(
-                            400,
-                            "turn_budget",
-                            f"This turn allows {turn_left} pixels; got {len(raw)}.",
-                        )
                     palette_ids = {swatch["id"] for swatch in json.loads(day["palette_json"])}
                     for pixel in raw:
                         if not (0 <= pixel["x"] < GRID and 0 <= pixel["y"] < GRID):
@@ -471,8 +476,6 @@ class Store:
                             raise ApiError(400, "bad_color", "Color is not in today's palette.")
                     collapsed = _collapse(raw)
                     charged = len(collapsed)
-                    if charged > day_left:
-                        raise ApiError(400, "day_budget", "That batch exceeds the pixels left today.")
                     focus = _parse_focus(payload.get("focus"))
                     canvas = bytearray(bytes(day["canvas"]))
                     for x, y, color in collapsed:
@@ -524,7 +527,6 @@ class Store:
                 raise
             self._flush()
         fresh = self.day_by_id(day_id)
-        remaining_day = int(self._settings()["pixels_per_artist_day"]) - self._pixels_used(day_id, agent_id)
         return {
             "ok": True,
             "action": action,
@@ -532,7 +534,7 @@ class Store:
             "done": done,
             "slice_index": index,
             "round_index": round_on_slice(index),
-            "pixels_remaining_day": remaining_day,
+            "pixels_remaining_day": PIXELS_PER_ARTIST_DAY,
             "pixels_remaining_turn": 0,
             "turns_remaining": self._turns_remaining(fresh, agent_id, self.now()),
             "to_act": False,
@@ -578,10 +580,7 @@ class Store:
                 and not self._is_skipped(day["id"], agent_id)
                 and self._action_for_slice(day["id"], index) is None
             )
-        settings = self._settings()
-        used = self._pixels_used(day["id"], agent_id) if day else 0
-        day_left = int(settings["pixels_per_artist_day"]) - used
-        turn_left = min(int(settings["pixels_per_turn"]), max(day_left, 0)) if to_act else 0
+        turn_left = None if to_act else 0
         if phase == "during":
             round_index = round_on_slice(index)
             _, slice_end = slice_window(now.astimezone(NY).date(), index)
@@ -628,7 +627,7 @@ class Store:
             "slice_index": index,
             "slice_starts_at_unix": int(slice_start.timestamp()),
             "slice_ends_at_unix": int(slice_end.timestamp()),
-            "pixels_remaining_day": max(day_left, 0),
+            "pixels_remaining_day": PIXELS_PER_ARTIST_DAY,
             "pixels_remaining_turn": turn_left,
             "recent_strokes": strokes,
             "canvas_stats": _stats(bytes(day["canvas"]) if day and day["canvas"] is not None else None, palette),
@@ -754,13 +753,12 @@ class Store:
         artists = []
         for agent in order:
             used = self._pixels_used(featured["id"], agent)
-            cap = int(self._settings()["pixels_per_artist_day"])
             artists.append(
                 {
                     "agent_id": agent,
                     "display_name": DISPLAY[agent],
                     "pixels_used": used,
-                    "pixels_remaining_day": max(cap - used, 0),
+                    "pixels_remaining_day": PIXELS_PER_ARTIST_DAY,
                     "turns_remaining": self._turns_remaining(featured, agent, now if is_today else _lock_time(featured["ny_date"])),
                     "skipped": self._is_skipped(featured["id"], agent),
                     "to_act": bool(
@@ -804,14 +802,7 @@ class Store:
                 else None
             ),
             "turns_remaining": active["turns_remaining"] if active else None,
-            "pixels_remaining_turn": (
-                min(
-                    int(self._settings()["pixels_per_turn"]),
-                    active["pixels_remaining_day"],
-                )
-                if active
-                else 0
-            ),
+            "pixels_remaining_turn": None if active else 0,
             "artists": artists,
             "slices": slices,
             "recent_strokes": self._recent_strokes(featured["id"], include_latest_pixels=False),
@@ -993,7 +984,10 @@ class Store:
                 "created_at_unix": row["created_at"],
             }
             if include_latest_pixels and offset == 0 and row["action"] == "paint" and row["pixels_json"]:
-                item["pixels"] = json.loads(row["pixels_json"])
+                if int(row["pixel_count"]) <= TURN_VIEW_INLINE_PIXELS:
+                    item["pixels"] = json.loads(row["pixels_json"])
+                else:
+                    item["pixels_omitted"] = True
             strokes.append(item)
         return strokes
 

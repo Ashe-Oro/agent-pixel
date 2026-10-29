@@ -128,6 +128,11 @@
       background: #0c1224;
       padding: 8px;
     }
+    .grid-bounds {
+      width: 100%;
+      border: 1px solid #ffd36a;
+      background: #0c1224;
+    }
     img.pixels, .placeholder {
       display: block;
       width: 100%;
@@ -206,6 +211,7 @@
       image-rendering: pixelated;
       image-rendering: crisp-edges;
       background: #0c1224;
+      border: 1px solid #ffd36a;
     }
     .card span { display: block; margin-top: 6px; font-size: 13px; }
     footer {
@@ -248,11 +254,13 @@
     <div class="stage">
       <div class="frame">
         <div class="mat" id="mat">
-          <div class="placeholder" id="placeholder">Loading the grid…</div>
-          <img class="pixels" id="mural" alt="" hidden>
+          <div class="grid-bounds" data-canvas-outline="256" aria-label="Full 256 by 256 canvas">
+            <div class="placeholder" id="placeholder">Loading the grid…</div>
+            <img class="pixels" id="mural" alt="" hidden>
+          </div>
         </div>
       </div>
-      <p class="caption" id="caption">256 × 256 palette pixels, scaled with nearest-neighbor so the edges stay hard.</p>
+      <p class="caption" id="caption">256 × 256 palette pixels. The gold rim is the whole grid, including unpainted cells. Scaled with nearest-neighbor so the edges stay hard.</p>
     </div>
     <aside id="panel">
       <h2>Waiting for the design</h2>
@@ -285,6 +293,12 @@
       return dayParam ? `/watch/state?day_id=${encodeURIComponent(dayParam)}` : "/watch/state";
     }
 
+    function budgetText(value) {
+      if (value === null) return "unlimited";
+      if (value === undefined || value === "") return "—";
+      return String(value);
+    }
+
     function render(data) {
       const clock = document.getElementById("clock");
       const label = data.clock ? data.clock.ny_label : "";
@@ -297,7 +311,7 @@
         notes.push(`Viewing ${esc(data.ny_date)} from the archive. <a href="/watch">Back to today</a>.`);
       }
       if (data.demo_seed) {
-        notes.push("Demo cabin is baked into the opening canvas so the grid is visible. Artist budgets are still full. A real 8:00 routine starts blank after design.");
+        notes.push("Demo cabin is baked into the opening canvas so the grid is visible. A paint in the open slice is not capped. A real 8:00 routine starts blank after design.");
       }
       if (data.clock && data.clock.pinned) {
         notes.push("The dev clock is pinned so this morning stays open. POST /host/clock {\"mode\":\"realtime\"} to follow the wall clock.");
@@ -346,8 +360,8 @@
         panelBits.push(`<p class="status-line">Waiting on the design agent</p>`);
       }
       const turns = active ? active.turns_remaining : "—";
-      const pixels = active ? active.pixels_remaining_day : "—";
-      const turnPx = data.pixels_remaining_turn || 0;
+      const pixels = active ? budgetText(active.pixels_remaining_day) : "—";
+      const turnPx = budgetText(data.pixels_remaining_turn);
       panelBits.push(`<div class="meta-grid">
         <div class="stat"><b>${esc(turns)}</b><span>turns left today</span></div>
         <div class="stat"><b>${esc(pixels)}</b><span>pixels left today</span></div>

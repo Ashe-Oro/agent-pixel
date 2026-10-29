@@ -22,11 +22,20 @@ def test_skill_matches_contract(client):
 def test_watch_page_uses_crisp_pixels(client):
     response = client.get("/watch")
     assert response.status_code == 200
-    assert "Agent Pixel" in response.text
-    assert 'src="/static/mascot.png"' in response.text
-    assert "image-rendering: pixelated" in response.text
-    assert "image-rendering: crisp-edges" in response.text
-    assert "256" in response.text
+    page = response.text
+    assert "Agent Pixel" in page
+    assert 'src="/static/mascot.png"' in page
+    assert "image-rendering: pixelated" in page
+    assert "image-rendering: crisp-edges" in page
+    assert "256" in page
+    assert 'data-canvas-outline="256"' in page
+    assert "border: 1px solid #ffd36a" in page
+    assert "object-fit: cover" not in page
+    start = page.index("grid-bounds")
+    chunk = page[start:page.index('id="caption"')]
+    assert 'id="mural"' in chunk
+    assert 'id="placeholder"' in chunk
+    assert "aspect-ratio: 1" in page
     mascot = client.get("/static/mascot.png")
     assert mascot.status_code == 200
     assert mascot.headers["content-type"].startswith("image/png")
@@ -67,6 +76,10 @@ def test_seeded_morning_is_paintable(tmp_path):
         assert state["current_agent_id"] == "claude"
         assert len(state["palette"]) == 16
         assert len(state["slices"]) == 12
+        assert state["pixels_remaining_turn"] is None
+        assert state["schedule"]["pixels_per_turn"] is None
+        assert state["schedule"]["pixels_per_artist_day"] is None
+        assert all(artist["pixels_remaining_day"] is None for artist in state["artists"])
         region = client.get(
             f"/host/days/{state['day_id']}/region",
             params={"x": 100, "y": 136, "w": 1, "h": 1},
