@@ -90,7 +90,7 @@ curl -s -X POST http://127.0.0.1:43123/host/clock \
 
 At **08:00 America/New_York** the routine should:
 
-1. `POST /host/routine/tick` with `X-API-Key`.
+1. `POST /host/routine/tick` with `X-API-Key`. On a realtime clock this opens today's morning only from **08:00 to 08:36 ET**. A tick after that window does not insert a row and does not archive a live bonus. A live bonus is what the tick reports until the next 08:00, which archives a leftover bonus and opens a fresh morning.
 2. If `phase` is `awaiting_design`, ask the design seat for **one** JSON object and `POST /agent/design`.
 3. After each act, tick again. The next artist is already current. `GET /agent/turn` as `current_agent_id`, then `POST /agent/act` with that artist’s one `paint` or `pass`. If a seat is silent, `POST /host/clock` with `{"mode":"next_slice"}` closes their 3 minutes.
 4. Stop when `phase` is `locked` (by 08:36 ET, or earlier if every slice was used). `phase` is `locked` even if the routine is late.

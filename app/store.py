@@ -655,28 +655,46 @@ class Store:
         return row
 
     def today_row(self) -> sqlite3.Row | None:
-        """The canvas seats paint. None until this morning or a bonus is open."""
+        """The canvas seats paint. A live bonus wins over a finished morning."""
         now = self.now()
+        bonus = self._live_bonus(now)
         if self._clock_pinned():
-            bonus = self._live_bonus(now)
             if bonus is not None:
                 return bonus
             return self._calendar_row(ny_date(now))
-        morning = self._morning_row(ny_date(now), include_archived=False)
-        if morning is not None:
-            return morning
-        return self._live_bonus(now)
+        if bonus is not None:
+            return bonus
+        return self._morning_row(ny_date(now), include_archived=False)
 
-    def _ensure_morning(self, now: datetime) -> sqlite3.Row:
+    def _newest_row(self) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM days ORDER BY id DESC LIMIT 1").fetchone()
+
+    def _morning_start(self, now: datetime) -> datetime:
+        start, _ = day_bounds(now.astimezone(NY).date())
+        return start
+
+    def _ensure_morning(self, now: datetime) -> sqlite3.Row | None:
+        """Open today's morning only inside 08:00–08:36 ET. Never insert outside it.
+
+        A live bonus that opened at or after today's 08:00 is left alone. A
+        leftover bonus from before that 08:00 is archived when the new morning
+        is created.
+        """
         key = ny_date(now)
+        phase, _ = position(now)
         existing = self._morning_row(key, include_archived=True)
         if existing is not None:
             return existing
+        if phase != "during":
+            return None
+        start = self._morning_start(now)
+        bonus = self._live_bonus(now)
+        if bonus is not None and self._opens_at(bonus) >= start:
+            return None
         self._archive_open(now)
-        opens, _ = day_bounds(now.astimezone(NY).date())
-        return self._insert_day(now, KIND_MORNING, opens)
+        return self._insert_day(now, KIND_MORNING, start)
 
-    def _ensure_today(self, now: datetime) -> sqlite3.Row:
+    def _ensure_today(self, now: datetime) -> sqlite3.Row | None:
         if not self._clock_pinned():
             phase, _ = position(now)
             if phase == "before":
@@ -684,6 +702,17 @@ class Store:
                 if existing is not None:
                     return existing
                 raise ApiError(409, "before_routine", "The morning opens at 08:00 America/New_York.")
+            if phase != "during":
+                bonus = self._live_bonus(now)
+                if bonus is not None:
+                    return bonus
+                morning = self._morning_row(ny_date(now), include_archived=False)
+                if morning is not None:
+                    return morning
+                newest = self._newest_row()
+                if newest is not None:
+                    return newest
+                raise ApiError(409, "morning_locked", "The morning window has passed.")
             return self._ensure_morning(now)
         bonus = self._live_bonus(now)
         if bonus is not None:
@@ -704,6 +733,9 @@ class Store:
                 day = self._ensure_today(now)
             except ApiError:
                 return None
+            if day is None:
+                current = self.today_row()
+                return current["id"] if current is not None else None
             return day["id"]
 
         day_id = self._run_write(mutate)
@@ -1108,22 +1140,40 @@ class Store:
             now = self.now()
             pinned = self._clock_pinned()
             phase, _ = position(now)
-            if not pinned and phase != "before":
+            bonus = self._live_bonus(now)
+            if not pinned and phase == "during":
+                start = self._morning_start(now)
+                if bonus is not None and self._opens_at(bonus) >= start:
+                    saved["day_id"] = bonus["id"]
+                    return
                 day = self._ensure_morning(now)
+                if day is None:
+                    saved["closed"] = True
+                    return
                 if int(day["archived"]):
                     bonus = self._live_bonus(now)
                     if bonus is not None:
-                        day = bonus
+                        saved["day_id"] = bonus["id"]
+                        return
                 saved["day_id"] = day["id"]
                 return
-            bonus = self._live_bonus(now)
             if bonus is not None:
                 saved["day_id"] = bonus["id"]
                 return
             if phase == "before":
                 saved["before"] = True
                 return
+            if not pinned:
+                newest = self._newest_row()
+                if newest is not None:
+                    saved["day_id"] = newest["id"]
+                    return
+                saved["closed"] = True
+                return
             day = self._ensure_today(now)
+            if day is None:
+                saved["closed"] = True
+                return
             saved["day_id"] = day["id"]
 
         self._run_write(mutate)
@@ -1135,6 +1185,18 @@ class Store:
                 "ny_now": now.astimezone(NY).isoformat(),
                 "ny_label": label_clock(now),
                 "hint": "Wait until 08:00 America/New_York, then tick again and post a design.",
+                "day": None,
+            }
+        if saved.get("closed"):
+            return {
+                "ok": True,
+                "phase": "locked",
+                "ny_now": now.astimezone(NY).isoformat(),
+                "ny_label": label_clock(now),
+                "slice_index": None,
+                "round_index": None,
+                "current_agent_id": None,
+                "hint": "The morning window has passed. POST /host/canvas/new to open a bonus, or wait until 08:00 ET.",
                 "day": None,
             }
         return self._tick_payload(self.day_by_id(saved["day_id"]), now)
