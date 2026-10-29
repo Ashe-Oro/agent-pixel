@@ -76,6 +76,25 @@ def test_watch_slice_cards_are_layer_toggles(client):
     assert "/host/clock" not in page
 
 
+def test_watch_select_all_and_none_controls(client):
+    page = client.get("/watch").text
+    assert 'id="select-all"' in page
+    assert 'id="select-none"' in page
+    assert ">Select all<" in page
+    assert ">Select none<" in page
+    assert 'aria-label="Slice selection"' in page
+    assert "function refreshSliceView()" in page
+    assert page.count("refreshSliceView();") == 3
+    assert "for (const slice of latest.slices || []) selected.add(slice.index);" in page
+    none_handler = page.split('getElementById("select-none").addEventListener', 1)[1]
+    assert "selected.clear()" in none_handler
+    assert "refreshSliceView()" in none_handler
+    assert "button.slice-action" in page
+    mobile = page.split("@media (max-width: 860px)", 1)[1]
+    assert ".slice-bar { flex-direction: column; }" in mobile
+    assert "button.slice-action { min-height: 44px; }" in mobile
+
+
 def test_subset_replay_and_default_full_view(client):
     opened = open_design(client, "2026-10-28T08:00:00")
     day_id = opened["day_id"]

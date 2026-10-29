@@ -168,6 +168,7 @@ Order rotates with `day_index` unless `rotate` is false. Day 1 is Claude → Gro
 - Several cards stack those slices in ledger order. On a shared cell, the later selected stroke covers the earlier one.
 - Every card selected shows the finished mural again, including anything that was on the canvas before the first stroke.
 - Tap a selected card to remove that layer. An empty, passed, or upcoming slice shows the unpainted background.
+- Select all turns every card on. Select none clears the selection. Both show the finished mural, the same as every card or no card.
 
 Painting over another artist is still allowed. The filter does not lock cells. Artists do not use the filter. Seats still paint from `TurnView` and `POST /agent/act`. The filter is a public PNG (`slices` on `/watch/canvas.png`). It does not return the stroke ledger.
 
