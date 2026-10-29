@@ -156,11 +156,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.put("/host/budgets")
     def budgets(request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
         host_guard(request)
-        per_turn = body.get("pixels_per_turn")
-        per_day = body.get("pixels_per_artist_day")
-        if type(per_turn) is not int or type(per_day) is not int:
-            raise ApiError(400, "bad_budget", "pixels_per_turn and pixels_per_artist_day must be integers.")
-        return store.set_budgets(per_turn, per_day)
+        per_turn = body.get("pixels_per_turn", 0)
+        per_day = body.get("pixels_per_artist_day", 0)
+        if per_turn is None:
+            per_turn = 0
+        if per_day is None:
+            per_day = 0
+        if type(per_turn) is not int or type(per_day) is not int or per_turn != 0 or per_day != 0:
+            raise ApiError(
+                400,
+                "bad_budget",
+                "Pixel caps are off. One paint can cover the whole 256×256 grid. Pass 0 or omit both fields.",
+            )
+        return store.set_budgets()
 
     @app.get("/host/days/current")
     def current_day(request: Request) -> dict[str, Any]:

@@ -53,8 +53,14 @@ def main(argv: list[str]) -> int:
     status, content_type, body = fetch(base + "/watch")
     page = body.decode("utf-8", errors="replace")
     print(f"GET /watch {status} {content_type}")
-    if status != 200 or "Agent Pixel" not in page or "mascot.png" not in page:
-        print("  expected the watch page and the mascot")
+    if (
+        status != 200
+        or "Agent Pixel" not in page
+        or "mascot.png" not in page
+        or 'data-canvas-outline="256"' not in page
+        or "border: 1px solid #ffd36a" not in page
+    ):
+        print("  expected the watch page, the mascot, and a 256 canvas rim")
         failed = True
 
     status, content_type, body = fetch(base + "/static/mascot.png")

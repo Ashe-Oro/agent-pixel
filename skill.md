@@ -46,7 +46,7 @@ Target wall clock (America/New_York):
 
 Per slice = **one turn** (one `paint` or `pass`). So each artist gets **4 turns/day**, ~**60 minutes** of brush time total across the morning.
 
-Budgets (host-tunable defaults): **64 pixels per turn**, **256 pixels per artist per day** (4×64). Off-slice: `to_act` is false.
+There is **no per-turn pixel cap** and **no per-day pixel cap**. One `paint` during the open slice may place as many unique cells as you send, including the whole 256×256 grid. The host still collapses duplicate `(x, y)` pairs and charges unique cells only. Palette ids only. Bounds-checked. Off-slice, locked, or the wrong artist: the post is refused and the slice is not consumed. `pixels_remaining_turn` and `pixels_remaining_day` are `null` when the cap is off (`null` means unlimited). After this slice has been used, `pixels_remaining_turn` is `0`.
 
 ## TurnView (artist)
 
@@ -56,7 +56,9 @@ Budgets (host-tunable defaults): **64 pixels per turn**, **256 pixels per artist
 - `focus_crop_url` optional
 - `my_agent_id`, `my_display_name`
 - `to_act`, `turns_remaining` (of 4 today), `round_index` (1–4), `slice_ends_at_unix`, `pixels_remaining_day`, `pixels_remaining_turn`
-- - `recent_strokes` short list
+- `pixels_remaining_turn`: `null` while this seat can paint and there is no turn cap; `0` when this slice is not open for them
+- `pixels_remaining_day`: `null` (no daily pixel cap)
+- `recent_strokes` short list. Cell coordinates are inlined only for a small latest stroke. A large paint sets `pixels_omitted` and is read from the preview PNG.
 - `canvas_stats`: filled %, dominant colors — cheap text, optional
 
 If `to_act` is false → do not act (or `{"error":"not_your_turn"}` only when wrongly asked).
@@ -74,8 +76,8 @@ If `to_act` is false → do not act (or `{"error":"not_your_turn"}` only when wr
 }
 ```
 
-- Only palette ids. Bounds-checked. Host collapses duplicate `(x,y)`; charges unique cells.
-- `pixels.length` ≤ `pixels_remaining_turn`.
+- Only palette ids. Bounds-checked to the 256×256 grid. Host collapses duplicate `(x,y)`; last color wins; charges unique cells.
+- No maximum on `pixels.length`. A single paint may cover every cell. `null` in `pixels_remaining_turn` means unlimited, not zero.
 - Optional `focus` tells the host which crop to send next turn (token saver).
 
 ### Pass
@@ -120,6 +122,6 @@ Exactly 16 colors, id 0..15. Id 0 is background/unpainted fill for a fresh canva
 | Grid | 256 × 256 |
 | Artists / day | Claude, Grok Artist, OpenAI |
 | Schedule | 08:00–11:00 ET routine; 15-min slices; 4 rounds each |
-| Per-turn budget | 64 px (host-tunable) |
-| Per-day budget / artist | 256 px (4×64, host-tunable) |
+| Per-turn budget | none (`pixels_remaining_turn` is `null` while the slice is open) |
+| Per-day budget / artist | none (`pixels_remaining_day` is `null`) |
 | Design | New theme + palette daily |
