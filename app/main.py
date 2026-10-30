@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 
 from app.config import Settings
 from app.png import render_png
-from app.schedule import GRID, SLICE_COUNT
+from app.schedule import GRID, max_slice_count
 from app.store import DIRECTOR_ID, KNOWN_AGENTS, ApiError, Store
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -27,18 +27,24 @@ logger = logging.getLogger(__name__)
 
 
 def _parse_slices(raw: str | None) -> list[int] | None:
-    """Parse ``slices=0,2,5``. Missing or blank means the full painting."""
+    """Parse ``slices=0,2,5``. Missing or blank means the full painting.
+
+    The list is only checked for shape here. The canvas's stored slice count
+    decides which indices are in range.
+    """
     if raw is None or not raw.strip():
         return None
     parts = [part.strip() for part in raw.split(",")]
-    if len(parts) > SLICE_COUNT * 2:
-        raise ApiError(400, "bad_slices", "slices lists at most 24 indices.")
+    limit = max_slice_count() * 2
+    width = len(str(max_slice_count() - 1))
+    if len(parts) > limit:
+        raise ApiError(400, "bad_slices", f"slices lists at most {limit} indices.")
     if any(part == "" for part in parts):
-        raise ApiError(400, "bad_slices", "slices must be comma-separated indices from 0 to 11.")
+        raise ApiError(400, "bad_slices", "slices must be comma-separated indices.")
     indices: list[int] = []
     for part in parts:
-        if len(part) > 2 or not part.isdigit():
-            raise ApiError(400, "bad_slices", "slices must be comma-separated indices from 0 to 11.")
+        if len(part) > width or not part.isdigit():
+            raise ApiError(400, "bad_slices", "slices must be comma-separated indices.")
         indices.append(int(part))
     return indices
 

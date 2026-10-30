@@ -1,11 +1,14 @@
 """Wall-clock schedule for an Agent Pixel morning.
 
-America/New_York. The session opens at 08:00. Twelve slices, four rounds,
-three artists. Each slice stays open for at most ``SLICE_SECONDS`` (default
-180, three minutes) measured from when that slice opened. An on-time paint
-or pass closes the slice immediately and opens the next one. A slice with no
-action closes when its three minutes run out and is missed. Twelve timeouts
-end the morning 36 minutes after it opened; early acts finish it sooner.
+America/New_York. The session opens at 08:00. Three artists, each painting
+``tile_rounds()`` times (``TILE_ROUNDS``, default 6, so 18 slices). Each
+slice stays open for at most ``SLICE_SECONDS`` (default 180, three minutes)
+measured from when that slice opened. An on-time paint or pass closes the
+slice immediately and opens the next one. A slice with no action closes when
+its three minutes run out and is missed. With the default, eighteen timeouts
+end the morning 54 minutes after it opened (08:54 ET); early acts finish it
+sooner. A canvas stores its own slice count, so older 12-slice mornings keep
+that clock.
 """
 
 from __future__ import annotations
@@ -20,8 +23,13 @@ NY = ZoneInfo("America/New_York")
 OPEN_HOUR = 8
 # One place for the slice length. TILE_SLICE_SECONDS overrides it; 180 is 3 minutes.
 SLICE_SECONDS = int(os.environ.get("TILE_SLICE_SECONDS", "180"))
-ROUNDS = 4
+# TILE_ROUNDS is read when a canvas is created. 1..24, default 6.
+DEFAULT_ROUNDS = 6
+MIN_ROUNDS = 1
+MAX_ROUNDS = 24
 ARTISTS = ("claude", "grok-artist", "openai")
+# Canvases opened before TILE_ROUNDS existed ran four rounds, twelve slices.
+LEGACY_SLICE_COUNT = 4 * len(ARTISTS)
 DISPLAY = {
     "design": "Design",
     "ross": "Ross",
@@ -29,8 +37,6 @@ DISPLAY = {
     "grok-artist": "Grok Artist",
     "openai": "OpenAI",
 }
-SLICE_COUNT = ROUNDS * len(ARTISTS)  # 12
-SESSION_SECONDS = SLICE_COUNT * SLICE_SECONDS
 # None means unlimited. A paint in an open slice may cover every cell of the
 # grid. Settings still store 0 for these so older 64 / 256 rows can be cleared.
 PIXELS_PER_TURN = None
@@ -95,22 +101,82 @@ def design_wait_seconds() -> int:
     return env_seconds("TILE_DESIGN_WAIT_SECONDS", 300)
 
 
+def tile_rounds() -> int:
+    """Rounds per artist for a canvas created now. ``TILE_ROUNDS``.
+
+    Parsed like the other non-negative integer settings. Default 6.
+    Blank, non-integer, negative, zero, or a value outside 1..24 uses 6.
+    Zero is not a round count: a morning with no slices cannot open.
+    """
+    value = env_seconds("TILE_ROUNDS", DEFAULT_ROUNDS)
+    if value < MIN_ROUNDS or value > MAX_ROUNDS:
+        return DEFAULT_ROUNDS
+    return value
+
+
+def configured_slice_count() -> int:
+    """Slices on a canvas created with the current ``TILE_ROUNDS``."""
+    return tile_rounds() * len(ARTISTS)
+
+
+def max_slice_count() -> int:
+    """Largest slice count ``TILE_ROUNDS`` can store."""
+    return MAX_ROUNDS * len(ARTISTS)
+
+
+def resolve_slice_count(slice_count: int | None) -> int:
+    """Use ``slice_count`` when it is a real canvas length, else the setting."""
+    if slice_count is None:
+        return configured_slice_count()
+    if slice_count < 1:
+        return LEGACY_SLICE_COUNT
+    return slice_count
+
+
+def rounds_in(slice_count: int) -> int:
+    """Highest 1-based round number on a canvas with ``slice_count`` slices."""
+    if slice_count < 1:
+        return tile_rounds()
+    return (slice_count - 1) // len(ARTISTS) + 1
+
+
+def session_minutes(slice_count: int | None = None) -> int:
+    total = resolve_slice_count(slice_count)
+    return (total * SLICE_SECONDS) // 60
+
+
+def session_length_phrase(slice_count: int | None = None) -> str:
+    """How long every slice timing out lasts, for status copy."""
+    total = resolve_slice_count(slice_count)
+    seconds = total * SLICE_SECONDS
+    if seconds % 60 == 0:
+        minutes = seconds // 60
+        unit = "minute" if minutes == 1 else "minutes"
+        return f"{minutes} {unit}"
+    return f"{seconds} seconds"
+
+
 def ny_date(now: datetime) -> str:
     return now.astimezone(NY).date().isoformat()
 
 
-def day_bounds(d: date) -> tuple[datetime, datetime]:
-    """08:00 ET through the latest possible lock, when every slice times out."""
+def day_bounds(d: date, slice_count: int | None = None) -> tuple[datetime, datetime]:
+    """08:00 ET through the latest possible lock, when every slice times out.
+
+    ``slice_count`` is that canvas's stored length. Omit it for a new morning
+    under the current ``TILE_ROUNDS``.
+    """
     start = datetime(d.year, d.month, d.day, OPEN_HOUR, 0, 0, tzinfo=NY)
-    lock = start + timedelta(seconds=SESSION_SECONDS)
+    lock = start + timedelta(seconds=resolve_slice_count(slice_count) * SLICE_SECONDS)
     return start, lock
 
 
-def slice_window(d: date, index: int) -> tuple[datetime, datetime]:
+def slice_window(d: date, index: int, slice_count: int | None = None) -> tuple[datetime, datetime]:
     """Projected window when nobody acts early. Real windows come from ``walk_session``."""
-    if index < 0 or index >= SLICE_COUNT:
+    total = resolve_slice_count(slice_count)
+    if index < 0 or index >= total:
         raise ValueError(f"slice index {index} out of range")
-    start, _ = day_bounds(d)
+    start, _ = day_bounds(d, total)
     begin = start + timedelta(seconds=SLICE_SECONDS * index)
     end = begin + timedelta(seconds=SLICE_SECONDS)
     return begin, end
@@ -146,6 +212,7 @@ def walk_session(
     now: datetime,
     gate_seconds: int = 0,
     note_at: dict[int, datetime] | None = None,
+    slice_count: int | None = None,
 ) -> SessionClock:
     """Where a session is, given when each slice opened and which ones were used.
 
@@ -161,6 +228,7 @@ def walk_session(
     actions = acted_at or {}
     notes = note_at or {}
     gate = gate_seconds if gate_seconds > 0 else 0
+    total = resolve_slice_count(slice_count)
     cursor = start
     marks: list[SliceMark] = []
     live_index: int | None = None
@@ -169,7 +237,7 @@ def walk_session(
     gate_hold = False
     holding_index: int | None = None
     hold_until: datetime | None = None
-    for index in range(SLICE_COUNT):
+    for index in range(total):
         raw = actions.get(index)
         raw_local = raw.astimezone(NY) if raw is not None else None
         if parked:
@@ -240,11 +308,12 @@ def walk_session(
     )
 
 
-def position(now: datetime) -> tuple[str, int | None]:
+def position(now: datetime, slice_count: int | None = None) -> tuple[str, int | None]:
     """Calendar morning with no early acts: 08:00, then one slice every 3 minutes."""
     local = now.astimezone(NY)
-    start, _ = day_bounds(local.date())
-    clock = walk_session(start, {}, now)
+    total = resolve_slice_count(slice_count)
+    start, _ = day_bounds(local.date(), total)
+    clock = walk_session(start, {}, now, slice_count=total)
     return clock.phase, clock.index
 
 
@@ -252,19 +321,33 @@ def session_position(
     opens_at: datetime,
     now: datetime,
     acted_at: dict[int, datetime] | None = None,
+    slice_count: int | None = None,
 ) -> tuple[str, int | None]:
-    clock = walk_session(opens_at, acted_at, now)
+    clock = walk_session(opens_at, acted_at, now, slice_count=slice_count)
     return clock.phase, clock.index
 
 
-def session_slice_window(opens_at: datetime, index: int) -> tuple[datetime, datetime]:
+def session_slice_window(
+    opens_at: datetime,
+    index: int,
+    slice_count: int | None = None,
+) -> tuple[datetime, datetime]:
     """Projected window from ``opens_at`` when no earlier slice closed early."""
-    if index < 0 or index >= SLICE_COUNT:
+    total = resolve_slice_count(slice_count)
+    if index < 0 or index >= total:
         raise ValueError(f"slice index {index} out of range")
     start = opens_at.astimezone(NY)
     begin = start + timedelta(seconds=SLICE_SECONDS * index)
     end = begin + timedelta(seconds=SLICE_SECONDS)
     return begin, end
+
+
+def lock_label(slice_count: int | None = None) -> str:
+    """Wall-clock lock when an 08:00 canvas times out every slice and the gate is off."""
+    start = datetime(2000, 1, 1, OPEN_HOUR, 0, 0, tzinfo=NY)
+    total = resolve_slice_count(slice_count)
+    lock = start + timedelta(seconds=total * SLICE_SECONDS)
+    return label_hhmm(lock)
 
 
 def slice_index(now: datetime) -> int | None:

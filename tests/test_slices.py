@@ -9,7 +9,7 @@ from io import BytesIO
 from PIL import Image
 
 from app.config import ROOT
-from app.schedule import SLICE_COUNT
+from app.schedule import configured_slice_count
 from app.seed import DEMO_WINDOW
 from tests.conftest import auth, host, open_design, pin
 
@@ -113,7 +113,7 @@ def test_subset_replay_and_default_full_view(client):
     assert full.getpixel((13, 10)) == colors[6]
     assert full.getpixel((0, 0)) == colors[0]
 
-    every = ",".join(str(index) for index in range(SLICE_COUNT))
+    every = ",".join(str(index) for index in range(configured_slice_count()))
     assert full.tobytes() == canvas_image(client, day_id, slices=every).tobytes()
     assert full.tobytes() == canvas_image(client, day_id, slices="").tobytes()
     assert full.tobytes() == canvas_image(client, day_id, slices="  ").tobytes()
@@ -170,7 +170,7 @@ def test_subset_replay_and_default_full_view(client):
     assert cells(client, day_id, 12, 10) == [5]
     assert cells(client, day_id, 13, 10) == [6]
 
-    for bad in ("12", "nope", "-1", "0,1,", "0,99"):
+    for bad in ("18", "nope", "-1", "0,1,", "0,99"):
         response = client.get("/watch/canvas.png", params={"day_id": day_id, "slices": bad})
         assert response.status_code == 400, bad
         assert response.json()["error"] == "bad_slices"
@@ -229,7 +229,7 @@ def test_seeded_cabin_stays_on_the_full_view_only(tmp_path):
         window_x, window_y = DEMO_WINDOW
         full = canvas_image(client, day_id)
         one = canvas_image(client, day_id, slices="0")
-        every = canvas_image(client, day_id, slices=",".join(str(index) for index in range(SLICE_COUNT)))
+        every = canvas_image(client, day_id, slices=",".join(str(index) for index in range(configured_slice_count())))
         assert full.getpixel((window_x, window_y)) == colors[10]
         assert full.getpixel((1, 1)) == colors[11]
         assert one.getpixel((1, 1)) == colors[11]

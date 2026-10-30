@@ -254,7 +254,7 @@ def test_canvas_locked_wakes_a_host_seat(client, monkeypatch):
     open_design(client, "2026-10-28T08:00:00")
     set_hook(client, "host", ["canvas_locked"], url="http://127.0.0.1:9/host")
     set_hook(client, "ross", ["slice_closed"], url="http://127.0.0.1:9/ross")
-    pin(client, "2026-10-28T08:36:00")
+    pin(client, "2026-10-28T08:54:00")
     response = client.get("/cron/tick", headers=CRON)
     assert response.status_code == 200, response.text
     assert response.json()["phase"] == "locked"
@@ -264,7 +264,7 @@ def test_canvas_locked_wakes_a_host_seat(client, monkeypatch):
     assert by_seat["host"]["slice"] is None
     assert by_seat["host"]["render_url"] == f"/watch/canvas.png?day_id={by_seat['host']['day_id']}&scale=2"
     assert by_seat["ross"]["event"] == "slice_closed"
-    assert by_seat["ross"]["slice"] == 11
+    assert by_seat["ross"]["slice"] == 17
     client.get("/cron/tick", headers=CRON)
     assert len(seen) == 2
 

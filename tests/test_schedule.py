@@ -1,34 +1,39 @@
 from datetime import date
 
 from app.schedule import (
-    SLICE_COUNT,
     artist_on_slice,
+    configured_slice_count,
     day_bounds,
     label_hhmm,
+    lock_label,
     parse_ny_local,
     position,
     rotate,
     round_on_slice,
     slice_window,
+    tile_rounds,
     walk_session,
 )
 
 
-def test_twelve_slices_cover_eight_to_eight_thirty_six():
+def test_default_rounds_cover_eight_to_eight_fifty_four():
+    assert tile_rounds() == 6
+    assert configured_slice_count() == 18
     day = date(2026, 10, 28)
     start, lock = day_bounds(day)
     assert label_hhmm(start) == "08:00"
-    assert label_hhmm(lock) == "08:36"
+    assert label_hhmm(lock) == "08:54"
+    assert lock_label() == "08:54"
     first_begin, first_end = slice_window(day, 0)
-    last_begin, last_end = slice_window(day, 11)
+    last_begin, last_end = slice_window(day, 17)
     assert first_begin == start
     assert label_hhmm(first_end) == "08:03"
-    assert label_hhmm(last_begin) == "08:33"
+    assert label_hhmm(last_begin) == "08:51"
     assert last_end == lock
     order = ["claude", "grok-artist", "openai"]
-    sequence = [artist_on_slice(order, index) for index in range(12)]
-    assert sequence == order * 4
-    assert [round_on_slice(index) for index in range(12)] == [1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4]
+    sequence = [artist_on_slice(order, index) for index in range(18)]
+    assert sequence == order * 6
+    assert [round_on_slice(index) for index in (0, 3, 15, 17)] == [1, 2, 6, 6]
 
 
 def test_position_boundaries():
@@ -36,8 +41,38 @@ def test_position_boundaries():
     assert position(parse_ny_local("2026-10-28T08:00:00")) == ("during", 0)
     assert position(parse_ny_local("2026-10-28T08:02:59")) == ("during", 0)
     assert position(parse_ny_local("2026-10-28T08:03:00")) == ("during", 1)
-    assert position(parse_ny_local("2026-10-28T08:35:59")) == ("during", 11)
-    assert position(parse_ny_local("2026-10-28T08:36:00")) == ("after", None)
+    assert position(parse_ny_local("2026-10-28T08:53:59")) == ("during", 17)
+    assert position(parse_ny_local("2026-10-28T08:54:00")) == ("after", None)
+
+
+def test_twelve_slice_history_still_locks_at_eight_thirty_six():
+    day = date(2026, 10, 28)
+    start, lock = day_bounds(day, slice_count=12)
+    assert label_hhmm(lock) == "08:36"
+    assert lock_label(12) == "08:36"
+    _, last_end = slice_window(day, 11, slice_count=12)
+    assert last_end == lock
+    clock = walk_session(start, {}, parse_ny_local("2026-10-28T08:35:59"), slice_count=12)
+    assert clock.phase == "during"
+    assert clock.index == 11
+    assert len(clock.slices) == 12
+    done = walk_session(start, {}, parse_ny_local("2026-10-28T08:36:00"), slice_count=12)
+    assert done.phase == "after"
+    assert position(parse_ny_local("2026-10-28T08:36:00"), slice_count=12) == ("after", None)
+
+
+def test_tile_rounds_respects_bounds(monkeypatch):
+    monkeypatch.setenv("TILE_ROUNDS", "2")
+    assert tile_rounds() == 2
+    assert configured_slice_count() == 6
+    assert lock_label() == "08:18"
+    monkeypatch.setenv("TILE_ROUNDS", "24")
+    assert tile_rounds() == 24
+    assert configured_slice_count() == 72
+    for raw in ("0", "25", "-3", "nope", "", "6.5"):
+        monkeypatch.setenv("TILE_ROUNDS", raw)
+        assert tile_rounds() == 6, raw
+        assert configured_slice_count() == 18
 
 
 def test_review_gate_holds_until_a_note_or_the_timeout():
@@ -47,7 +82,7 @@ def test_review_gate_holds_until_a_note_or_the_timeout():
     assert held.phase == "holding"
     assert held.holding_index == 1
     assert held.index is None
-    assert len(held.slices) == SLICE_COUNT
+    assert len(held.slices) == configured_slice_count()
     opened = walk_session(start, acted, parse_ny_local("2026-10-28T08:01:25"), gate_seconds=75)
     assert opened.phase == "during"
     assert opened.index == 1
@@ -72,6 +107,16 @@ def test_review_gate_holds_until_a_note_or_the_timeout():
     immediate = walk_session(start, acted, parse_ny_local("2026-10-28T08:00:10"), gate_seconds=0)
     assert immediate.phase == "during"
     assert immediate.index == 1
+    # A 12-slice canvas still holds the same way; the gate does not grow the board.
+    legacy = walk_session(
+        start,
+        acted,
+        parse_ny_local("2026-10-28T08:00:20"),
+        gate_seconds=75,
+        slice_count=12,
+    )
+    assert legacy.phase == "holding"
+    assert len(legacy.slices) == 12
 
 
 def test_rotation_by_day_index():

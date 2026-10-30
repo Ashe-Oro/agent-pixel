@@ -6,7 +6,7 @@ def test_off_slice_is_rejected_and_pass_opens_the_next_artist(client):
     claude = client.get("/agent/turn", headers=auth("claude")).json()
     grok = client.get("/agent/turn", headers=auth("grok-artist")).json()
     assert claude["to_act"] is True
-    assert claude["turns_remaining"] == 4
+    assert claude["turns_remaining"] == 6
     assert claude["round_index"] == 1
     assert grok["to_act"] is False
     denied = client.post(
@@ -19,16 +19,16 @@ def test_off_slice_is_rejected_and_pass_opens_the_next_artist(client):
 
     passed = client.post("/agent/act", headers=auth("claude"), json={"type": "pass", "note": "yield"})
     assert passed.status_code == 200, passed.text
-    assert passed.json()["turns_remaining"] == 3
+    assert passed.json()["turns_remaining"] == 5
     assert passed.json()["to_act"] is False
     # Passing closes this slice immediately. Grok's 3 minutes start now.
     grok_now = client.get("/agent/turn", headers=auth("grok-artist")).json()
     assert grok_now["to_act"] is True
     assert grok_now["round_index"] == 1
-    assert grok_now["turns_remaining"] == 4
+    assert grok_now["turns_remaining"] == 6
     claude_later = client.get("/agent/turn", headers=auth("claude")).json()
     assert claude_later["to_act"] is False
-    assert claude_later["turns_remaining"] == 3
+    assert claude_later["turns_remaining"] == 5
 
 
 def test_pass_done_skips_remaining_rounds(client):
@@ -49,7 +49,7 @@ def test_pass_done_skips_remaining_rounds(client):
     assert skipped.json()["error"] == "rounds_skipped"
     state = client.get("/watch/state").json()
     claude_slices = [item for item in state["slices"] if item["agent_id"] == "claude"]
-    assert [item["state"] for item in claude_slices] == ["done", "skipped", "skipped", "skipped"]
+    assert [item["state"] for item in claude_slices] == ["done", "skipped", "skipped", "skipped", "skipped", "skipped"]
     grok = client.get("/agent/turn", headers=auth("grok-artist")).json()
     assert grok["to_act"] is True
     assert grok["round_index"] == 1
@@ -92,7 +92,7 @@ def test_missed_slice_does_not_roll_the_turn_forward(client):
     pin(client, "2026-10-28T08:03:00")
     claude = client.get("/agent/turn", headers=auth("claude")).json()
     assert claude["to_act"] is False
-    assert claude["turns_remaining"] == 3
+    assert claude["turns_remaining"] == 5
     late = client.post(
         "/agent/act",
         headers=auth("claude"),

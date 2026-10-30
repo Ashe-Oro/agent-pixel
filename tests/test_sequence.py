@@ -114,8 +114,8 @@ def test_morning_waits_until_a_running_one_off_locks(client, monkeypatch):
     assert client.get("/watch/state").json()["day_id"] == one_off
     assert client.get("/agent/turn", headers=auth("claude")).json()["day_id"] == one_off
 
-    # 07:50 plus twelve 3-minute slices is 08:26.
-    pin(client, "2026-10-30T08:26:00")
+    # 07:50 plus eighteen 3-minute slices is 08:44.
+    pin(client, "2026-10-30T08:44:00")
     started = client.get("/cron/tick", headers=CRON)
     assert started.status_code == 200, started.text
     assert started.json()["phase"] == "awaiting_design"

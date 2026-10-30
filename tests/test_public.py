@@ -12,10 +12,14 @@ def test_skill_matches_contract(client):
     assert body == (ROOT / "skill.md").read_text(encoding="utf-8")
     assert "256×256" in body
     assert "08:00" in body
-    assert "08:36" in body
+    assert "08:54" in body
+    assert "08:36" not in body
     assert "3-minute" in body
     assert "grok-artist" in body
-    assert "4 turns/day" in body
+    assert "6 turns/day" in body
+    assert "turns_remaining" in body and "of 6 today" in body
+    assert "round_index" in body and "1–6" in body
+    assert "18 slices" in body
     assert "8 turns" not in body
 
 
@@ -27,6 +31,11 @@ def test_watch_page_uses_crisp_pixels(client):
     assert 'src="/static/mascot.png"' in page
     assert "image-rendering: pixelated" in page
     assert "image-rendering: crisp-edges" in page
+    assert "repeat(3, minmax(0, 1fr))" in page
+    assert "54 minutes" in page
+    assert "36 minutes" not in page
+    assert "of ${esc(roundTotal)}" in page
+    assert "of 4" not in page
     assert "256" in page
     assert 'data-canvas-outline="256"' in page
     assert "border: 1px solid #ffd36a" in page
@@ -75,7 +84,11 @@ def test_seeded_morning_is_paintable(tmp_path):
         assert state["theme"] == "Cozy cabin in the woods"
         assert state["current_agent_id"] == "claude"
         assert len(state["palette"]) == 16
-        assert len(state["slices"]) == 12
+        assert len(state["slices"]) == 18
+        assert state["schedule"]["rounds"] == 6
+        assert state["schedule"]["slices"] == 18
+        assert state["schedule"]["locks"] == "08:54"
+        assert state["schedule"]["turns_per_artist"] == 6
         assert state["pixels_remaining_turn"] is None
         assert state["schedule"]["pixels_per_turn"] is None
         assert state["schedule"]["pixels_per_artist_day"] is None
