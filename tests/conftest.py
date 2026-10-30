@@ -3,6 +3,9 @@ import os
 os.environ["TILE_DB_PATH"] = "/tmp/tile-import-sideeffect.db"
 os.environ["TILE_SEED"] = "0"
 os.environ["TILE_PIN_MORNING"] = "0"
+# Production waits 75s for Ross's note. These tests keep the slice clock
+# contiguous unless a test sets TILE_NOTE_GATE_SECONDS itself.
+os.environ["TILE_NOTE_GATE_SECONDS"] = "0"
 
 import pytest
 from fastapi.testclient import TestClient
@@ -21,7 +24,7 @@ def client(tmp_path):
         seed=False,
         pin_morning=False,
         skill_path=ROOT / "skill.md",
-        seat_tokens={"seat-claude": "claude"},
+        seat_tokens={"seat-claude": "claude", "seat-ross": "ross"},
     )
     app = create_app(settings)
     with TestClient(app) as test_client:

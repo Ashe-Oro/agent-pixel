@@ -120,12 +120,15 @@ def test_wake_is_signed_once_and_a_later_slice_still_wakes(client, monkeypatch):
     start = datetime(2026, 10, 28, 8, 0, tzinfo=NY)
     assert payload == {
         "api_base_url": "https://pixel.example",
+        "brief": "Warm cabin, tall pines, soft chimney smoke, night sky",
         "day_id": turn.json()["day_id"],
+        "director_note": None,
         "ends_at_unix": int((start + timedelta(seconds=180)).timestamp()),
         "event": "slice_open",
         "seat": "claude",
         "slice": 0,
     }
+    assert "brief" not in client.get("/watch/state").json()
     assert SECRET not in body.decode()
     assert "test-key" not in body.decode()
     assert "seat-claude" not in body.decode()

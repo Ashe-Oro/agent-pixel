@@ -1,6 +1,7 @@
 from datetime import date
 
 from app.schedule import (
+    SLICE_COUNT,
     artist_on_slice,
     day_bounds,
     label_hhmm,
@@ -9,6 +10,7 @@ from app.schedule import (
     rotate,
     round_on_slice,
     slice_window,
+    walk_session,
 )
 
 
@@ -36,6 +38,40 @@ def test_position_boundaries():
     assert position(parse_ny_local("2026-10-28T08:03:00")) == ("during", 1)
     assert position(parse_ny_local("2026-10-28T08:35:59")) == ("during", 11)
     assert position(parse_ny_local("2026-10-28T08:36:00")) == ("after", None)
+
+
+def test_review_gate_holds_until_a_note_or_the_timeout():
+    start = parse_ny_local("2026-10-28T08:00:00")
+    acted = {0: parse_ny_local("2026-10-28T08:00:10")}
+    held = walk_session(start, acted, parse_ny_local("2026-10-28T08:00:20"), gate_seconds=75)
+    assert held.phase == "holding"
+    assert held.holding_index == 1
+    assert held.index is None
+    assert len(held.slices) == SLICE_COUNT
+    opened = walk_session(start, acted, parse_ny_local("2026-10-28T08:01:25"), gate_seconds=75)
+    assert opened.phase == "during"
+    assert opened.index == 1
+    noted = walk_session(
+        start,
+        acted,
+        parse_ny_local("2026-10-28T08:00:40"),
+        gate_seconds=75,
+        note_at={1: parse_ny_local("2026-10-28T08:00:30")},
+    )
+    assert noted.phase == "during"
+    assert noted.index == 1
+    early = walk_session(
+        start,
+        acted,
+        parse_ny_local("2026-10-28T08:00:10"),
+        gate_seconds=75,
+        note_at={1: parse_ny_local("2026-10-28T08:00:05")},
+    )
+    assert early.phase == "during"
+    assert early.index == 1
+    immediate = walk_session(start, acted, parse_ny_local("2026-10-28T08:00:10"), gate_seconds=0)
+    assert immediate.phase == "during"
+    assert immediate.index == 1
 
 
 def test_rotation_by_day_index():

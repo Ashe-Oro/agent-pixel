@@ -109,6 +109,7 @@
     .slice .who { display: block; margin-top: 4px; font-weight: 650; }
     .slice .meta { display: block; margin-top: 2px; font-size: 12px; color: var(--cream-dim); }
     .slice.active { background: rgba(255, 211, 106, 0.16); border-color: var(--gold); }
+    .slice.review { background: rgba(154, 182, 255, 0.16); border-color: #9ab6ff; }
     .slice.done { background: rgba(126, 174, 92, 0.16); border-color: rgba(126, 174, 92, 0.6); }
     .slice.missed, .slice.skipped { opacity: 0.55; }
     button.slice {
@@ -376,7 +377,7 @@
     </div>
     <aside id="panel">
       <h2>Waiting for the design</h2>
-      <p class="brief">The design agent publishes a theme and 16 colors. Then Claude, Grok Artist, and OpenAI each take four 3-minute turns.</p>
+      <p class="brief">The art director publishes a theme and 16 colors. Then Claude, Grok Artist, and OpenAI each take four 3-minute turns.</p>
     </aside>
   </main>
   <section class="chatter">
@@ -394,8 +395,8 @@
     <div class="archive-row" id="archive"></div>
   </section>
   <footer>
-    Fake art, no wallets. A Grok Bot routine — not an in-repo cron — kicks the day off at 8:00 ET.
-    This server enforces the slices either way.
+    Fake art, no wallets. The server opens the morning canvas at 8:00 ET.
+    The art director sets the theme. This server enforces the slices.
   </footer>
   <script>
     const params = new URLSearchParams(location.search);
@@ -573,13 +574,15 @@
       const active = (data.artists || []).find((artist) => artist.to_act);
       const panelBits = [];
       panelBits.push(`<h2>${esc(data.theme || "No theme yet")}</h2>`);
-      panelBits.push(`<p class="brief">${esc(data.brief || data.message || "")}</p>`);
+      panelBits.push(`<p class="brief">${esc(data.message || "")}</p>`);
       if (data.status === "painting" && data.current_display_name) {
         panelBits.push(`<p class="status-line">${esc(data.current_display_name)} holds the brush · round ${esc(data.round_index)} of 4</p>`);
       } else if (data.status === "locked") {
         panelBits.push(`<p class="status-line">Locked. The next morning starts blank.</p>`);
       } else if (data.status === "awaiting_design") {
-        panelBits.push(`<p class="status-line">Waiting on the design agent</p>`);
+        panelBits.push(`<p class="status-line">Waiting for today's theme</p>`);
+      } else if (data.status === "review") {
+        panelBits.push(`<p class="status-line">Waiting for the art director before the next slice</p>`);
       }
       const turns = active ? active.turns_remaining : "—";
       const pixels = active ? budgetText(active.pixels_remaining_day) : "—";
