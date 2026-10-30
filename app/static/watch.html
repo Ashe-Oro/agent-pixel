@@ -194,7 +194,9 @@
     .slice.active { background: rgba(255, 211, 106, 0.16); border-color: var(--gold); }
     .slice.review { background: rgba(154, 182, 255, 0.16); border-color: #9ab6ff; }
     .slice.done { background: rgba(126, 174, 92, 0.16); border-color: rgba(126, 174, 92, 0.6); }
-    .slice.missed, .slice.skipped { opacity: 0.55; }
+    .slice.missed, .slice.skipped, .slice.vetoed { opacity: 0.55; }
+    .slice.vetoed { background: rgba(168, 90, 58, 0.14); border-color: rgba(168, 90, 58, 0.7); }
+    .slice .layer.removed { text-decoration: line-through; }
     button.slice {
       appearance: none;
       color: inherit;
@@ -560,6 +562,7 @@
       missed: "missed",
       skipped: "skipped",
       upcoming: "upcoming",
+      vetoed: "vetoed",
     };
 
     function artistInitial(slice) {
@@ -771,6 +774,9 @@
         slice.round,
         slice.agent_id,
         slice.display_name,
+        slice.removed ? 1 : 0,
+        slice.pixel_count || 0,
+        (slice.history || []).map((item) => item.state + (item.removed ? "*" : "")).join(","),
         selected.has(slice.index) ? 1 : 0,
         String(slice.index) === tabOwner ? 1 : 0,
       ].join(":")).join("|");
@@ -789,22 +795,27 @@
       root.innerHTML = slices.map((slice, i) => {
         const on = selected.has(slice.index);
         const pressed = on ? "true" : "false";
-        const layer = on ? "Showing" : "Add layer";
-        const action = on ? "Showing this layer. Activate to hide it." : "Activate to show this layer.";
+        const history = slice.history || [];
+        const vetoedAttempt = history.some((item) => item.state === "vetoed");
+        const layer = slice.removed ? "Removed" : (on ? "Showing" : "Add layer");
+        const action = slice.removed
+          ? "Vetoed attempt removed from the canvas."
+          : (on ? "Showing this layer. Activate to hide it." : "Activate to show this layer.");
         const state = SLICE_STATES[slice.state] || "upcoming";
+        const stateText = vetoedAttempt ? state + " · vetoed" : state;
         const roundBreak = i > 0 && slice.round !== slices[i - 1].round ? " round-break" : "";
         const live = state === "active" || state === "review" ? " current" : "";
         const tab = String(slice.index) === tabOwner ? "0" : "-1";
-        const tip = slice.starts + "–" + slice.ends + " · " + slice.display_name + " · round " + slice.round + " · " + state;
-        return `<button type="button" class="slice ${state}${on ? " selected" : ""}${roundBreak}${live}${artistClass(slice)}" data-index="${esc(slice.index)}" data-round="${esc(slice.round)}" tabindex="${tab}" aria-pressed="${pressed}" aria-label="${esc(slice.starts)} to ${esc(slice.ends)}, ${esc(slice.display_name)}, round ${esc(slice.round)}, ${esc(state)}. ${action}" title="${esc(tip)}">
+        const tip = slice.starts + "–" + slice.ends + " · " + slice.display_name + " · round " + slice.round + " · " + stateText;
+        return `<button type="button" class="slice ${state}${vetoedAttempt ? " vetoed" : ""}${on ? " selected" : ""}${roundBreak}${live}${artistClass(slice)}" data-index="${esc(slice.index)}" data-round="${esc(slice.round)}" tabindex="${tab}" aria-pressed="${pressed}" aria-label="${esc(slice.starts)} to ${esc(slice.ends)}, ${esc(slice.display_name)}, round ${esc(slice.round)}, ${esc(stateText)}. ${action}" title="${esc(tip)}">
           <span class="top">
             <span class="initial" aria-hidden="true">${esc(artistInitial(slice))}</span>
             <span class="who">${esc(artistLabel(slice))}</span>
             <span class="round">R${esc(slice.round)}</span>
           </span>
           <span class="when">${esc(slice.starts)}–${esc(slice.ends)}</span>
-          <span class="meta"><i class="pip" aria-hidden="true"></i>${esc(state)}</span>
-          <span class="layer">${layer}</span>
+          <span class="meta"><i class="pip" aria-hidden="true"></i>${esc(stateText)}</span>
+          <span class="layer${slice.removed ? " removed" : ""}">${layer}</span>
         </button>`;
       }).join("");
       fitStrip(root);

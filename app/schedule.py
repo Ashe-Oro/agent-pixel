@@ -54,6 +54,23 @@ class SliceMark:
     closes: datetime
     acted: bool
     missed: bool
+    # A veto reopens this index. ``opens``/``deadline`` are the redo window.
+    redo: bool = False
+    vetoed: bool = False
+
+
+@dataclass(frozen=True)
+class RedoWindow:
+    """One veto of a slice. ``opens`` is when the redo started.
+
+    ``acted_at`` is when the redo paint or pass was stored. None means the
+    redo has not been used yet. ``seconds`` is the window length captured
+    when Ross vetoed, so a later settings change does not move it.
+    """
+
+    opens: datetime
+    acted_at: datetime | None
+    seconds: int
 
 
 @dataclass(frozen=True)
@@ -91,6 +108,15 @@ def note_gate_seconds() -> int:
     Default 75. ``0`` opens the next slice as soon as the previous one closes.
     """
     return env_seconds("TILE_NOTE_GATE_SECONDS", 75)
+
+
+def redo_seconds() -> int:
+    """How long a vetoed slice reopens for the same artist. ``TILE_REDO_SECONDS``.
+
+    Default 120 (two minutes). ``0`` closes the redo as soon as the veto lands,
+    and the review gate for the next slice starts then.
+    """
+    return env_seconds("TILE_REDO_SECONDS", 120)
 
 
 def design_wait_seconds() -> int:
@@ -187,15 +213,21 @@ def _gate_release(
     index: int,
     gate: int,
     notes: dict[int, datetime],
+    not_before: datetime | None = None,
 ) -> datetime:
     """When slice ``index`` may open after ``previous_close``.
 
     A note posted at or before the previous slice closed skips the wait.
     A note posted during the wait opens the slice at that moment.
     Otherwise the slice opens ``gate`` seconds after the previous close.
+    ``not_before`` drops notes posted earlier than that instant. A veto uses
+    it so a note about the removed attempt does not skip the gate that runs
+    after the redo.
     """
     timeout = previous_close + timedelta(seconds=gate)
     noted = notes.get(index)
+    if noted is not None and not_before is not None and noted.astimezone(NY) < not_before.astimezone(NY):
+        noted = None
     if noted is None:
         return timeout
     noted_local = noted.astimezone(NY)
@@ -206,6 +238,49 @@ def _gate_release(
     return timeout
 
 
+def _apply_redo(
+    mark: SliceMark,
+    close: datetime,
+    local: datetime,
+    redos: dict[int, RedoWindow] | None,
+) -> tuple[SliceMark, datetime, bool]:
+    """Stretch a closed slice by its redo window.
+
+    Returns the mark to keep, the cursor for the following slice, and whether
+    the redo is the live slice. No redo leaves the mark and ``close`` alone.
+    """
+    if not redos or mark.index not in redos:
+        return mark, close, False
+    redo = redos[mark.index]
+    start = redo.opens.astimezone(NY)
+    if start < close:
+        start = close
+    acted = redo.acted_at.astimezone(NY) if redo.acted_at is not None else None
+    # A clock pinned before the veto still shows the original close.
+    if local < start and (acted is None or acted > local):
+        return mark, close, False
+    span = redo.seconds if redo.seconds > 0 else 0
+    deadline = start + timedelta(seconds=span)
+    if acted is not None and acted >= start:
+        redo_close = acted if acted < deadline else deadline
+        return (
+            SliceMark(mark.index, start, deadline, redo_close, True, False, True, True),
+            redo_close,
+            False,
+        )
+    if local < deadline:
+        return (
+            SliceMark(mark.index, start, deadline, deadline, False, False, True, True),
+            deadline,
+            True,
+        )
+    return (
+        SliceMark(mark.index, start, deadline, deadline, False, True, True, True),
+        deadline,
+        False,
+    )
+
+
 def walk_session(
     opens_at: datetime,
     acted_at: dict[int, datetime] | None,
@@ -213,6 +288,7 @@ def walk_session(
     gate_seconds: int = 0,
     note_at: dict[int, datetime] | None = None,
     slice_count: int | None = None,
+    redos: dict[int, RedoWindow] | None = None,
 ) -> SessionClock:
     """Where a session is, given when each slice opened and which ones were used.
 
@@ -222,11 +298,17 @@ def walk_session(
     for that slice or until the gate elapses. An unused slice closes
     ``SLICE_SECONDS`` after it opened. A done-skip recorded before a slice
     would open closes in zero time and does not add a review wait.
+
+    ``redos`` reopens a closed slice for the same artist before that gate.
+    The following slices, including their review gates and the lock, start
+    after the redo closes. Notes posted before the veto do not release the
+    gate that follows the redo.
     """
     start = opens_at.astimezone(NY)
     local = now.astimezone(NY)
     actions = acted_at or {}
     notes = note_at or {}
+    redo_windows = redos or {}
     gate = gate_seconds if gate_seconds > 0 else 0
     total = resolve_slice_count(slice_count)
     cursor = start
@@ -237,6 +319,16 @@ def walk_session(
     gate_hold = False
     holding_index: int | None = None
     hold_until: datetime | None = None
+
+    def finish_closed(mark: SliceMark, close: datetime) -> None:
+        nonlocal cursor, parked, live_index, live_deadline
+        revised, cursor, redo_live = _apply_redo(mark, close, local, redo_windows)
+        marks.append(revised)
+        if redo_live:
+            parked = True
+            live_index = revised.index
+            live_deadline = revised.deadline
+
     for index in range(total):
         raw = actions.get(index)
         raw_local = raw.astimezone(NY) if raw is not None else None
@@ -251,7 +343,11 @@ def walk_session(
             continue
         instant = raw_local is not None and raw_local <= cursor
         if not instant and index > 0 and gate:
-            release = _gate_release(cursor, index, gate, notes)
+            not_before = None
+            previous = redo_windows.get(index - 1)
+            if previous is not None:
+                not_before = previous.opens
+            release = _gate_release(cursor, index, gate, notes, not_before)
             if local < release:
                 parked = True
                 gate_hold = True
@@ -265,14 +361,13 @@ def walk_session(
                 cursor = release
         deadline = cursor + timedelta(seconds=SLICE_SECONDS)
         if instant:
-            marks.append(SliceMark(index, cursor, deadline, cursor, True, False))
+            finish_closed(SliceMark(index, cursor, deadline, cursor, True, False), cursor)
             continue
         if raw_local is not None:
             close = raw_local if raw_local < deadline else deadline
             if close < cursor:
                 close = cursor
-            marks.append(SliceMark(index, cursor, deadline, close, True, False))
-            cursor = close
+            finish_closed(SliceMark(index, cursor, deadline, close, True, False), close)
             continue
         if local < cursor:
             parked = True
@@ -286,8 +381,7 @@ def walk_session(
             marks.append(SliceMark(index, cursor, deadline, deadline, False, False))
             cursor = deadline
             continue
-        marks.append(SliceMark(index, cursor, deadline, deadline, False, True))
-        cursor = deadline
+        finish_closed(SliceMark(index, cursor, deadline, deadline, False, True), deadline)
     lock_at = cursor
     if local < start:
         phase, index = "before", None

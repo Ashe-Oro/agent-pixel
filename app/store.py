@@ -53,7 +53,9 @@ from app.schedule import (
     label_clock,
     label_hhmm,
     lock_label,
+    RedoWindow,
     note_gate_seconds,
+    redo_seconds,
     resolve_slice_count,
     ny_date,
     parse_ny_local,
@@ -89,7 +91,8 @@ _DAYS_COLUMNS = f"""
               kind TEXT NOT NULL DEFAULT 'legacy',
               archived INTEGER NOT NULL DEFAULT 0,
               archived_at INTEGER,
-              slice_count INTEGER NOT NULL DEFAULT {LEGACY_SLICE_COUNT}
+              slice_count INTEGER NOT NULL DEFAULT {LEGACY_SLICE_COUNT},
+              canvas_rev INTEGER NOT NULL DEFAULT 0
 """
 
 # Latest-stroke cells stay in TurnView only while the list is small.
@@ -97,6 +100,7 @@ _DAYS_COLUMNS = f"""
 TURN_VIEW_INLINE_PIXELS = 512
 BRIEF_MAX = 4000
 DIRECTOR_NOTE_MAX = 2000
+VETO_REASON_MAX = 2000
 DIRECTOR_ID = "ross"
 FALLBACK_THEME = "Open canvas"
 FALLBACK_BRIEF = (
@@ -357,7 +361,10 @@ class Store:
               focus_json TEXT,
               pixels_json TEXT,
               created_at INTEGER NOT NULL,
-              UNIQUE (day_id, slice_index)
+              state TEXT NOT NULL DEFAULT 'active',
+              veto_reason TEXT,
+              vetoed_at INTEGER,
+              redo_seconds INTEGER
             );
             CREATE TABLE IF NOT EXISTS chat (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -401,6 +408,8 @@ class Store:
             self.dirty = True
         self._migrate_days()
         self._ensure_slice_count()
+        self._ensure_canvas_rev()
+        self._ensure_action_history()
         cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(days)")}
         if {"kind", "archived", "ny_date", "id"} <= cols:
             self.conn.execute(
@@ -542,6 +551,128 @@ class Store:
             return LEGACY_SLICE_COUNT
         return stored
 
+    def _ensure_canvas_rev(self) -> None:
+        """Cache-bust renders after a veto without touching older URLs.
+
+        ``0`` keeps the preview path exactly as it was. A veto, and a paint
+        during the redo that follows, increments it and appends ``&v=``.
+        """
+        cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(days)")}
+        if "canvas_rev" in cols:
+            return
+        self.conn.execute(
+            "ALTER TABLE days ADD COLUMN canvas_rev INTEGER NOT NULL DEFAULT 0"
+        )
+        self.dirty = True
+
+    def _ensure_action_history(self) -> None:
+        """Keep every stroke, and allow one later redo after a veto.
+
+        Older databases have ``UNIQUE (day_id, slice_index)``, which cannot
+        hold both the vetoed attempt and the redo. The rebuild copies every
+        row, marks it active, and replaces that constraint with a partial
+        unique index so only one live attempt exists per slice.
+        """
+        if self._actions_need_rebuild():
+            self._rebuild_actions()
+        else:
+            cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(actions)")}
+            for name, ddl in (
+                ("veto_reason", "ALTER TABLE actions ADD COLUMN veto_reason TEXT"),
+                ("vetoed_at", "ALTER TABLE actions ADD COLUMN vetoed_at INTEGER"),
+                ("redo_seconds", "ALTER TABLE actions ADD COLUMN redo_seconds INTEGER"),
+            ):
+                if name in cols:
+                    continue
+                self.conn.execute(ddl)
+                self.dirty = True
+        self.conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS actions_one_active
+            ON actions (day_id, slice_index) WHERE state = 'active'
+            """
+        )
+
+    def _actions_need_rebuild(self) -> bool:
+        cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(actions)")}
+        if "state" not in cols:
+            return True
+        row = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'actions'"
+        ).fetchone()
+        compact = " ".join((row[0] or "").lower().split()) if row else ""
+        if "unique (day_id, slice_index)" in compact or "unique(day_id, slice_index)" in compact:
+            return True
+        for index in self.conn.execute("PRAGMA index_list(actions)").fetchall():
+            if not index["unique"] or index["name"] == "actions_one_active":
+                continue
+            name = index["name"]
+            if not name.replace("_", "").isalnum():
+                continue
+            info = self.conn.execute(f'PRAGMA index_info("{name}")').fetchall()
+            if [col["name"] for col in info] != ["day_id", "slice_index"]:
+                continue
+            definition = self.conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name = ?",
+                (name,),
+            ).fetchone()
+            text = " ".join((definition[0] or "").lower().split()) if definition else ""
+            if "where" not in text:
+                return True
+        return False
+
+    def _rebuild_actions(self) -> None:
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            self.conn.execute("DROP TABLE IF EXISTS actions_v2")
+            self.conn.execute(
+                """
+                CREATE TABLE actions_v2 (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  day_id INTEGER NOT NULL,
+                  agent_id TEXT NOT NULL,
+                  slice_index INTEGER NOT NULL,
+                  round_index INTEGER NOT NULL,
+                  action TEXT NOT NULL,
+                  done INTEGER NOT NULL DEFAULT 0,
+                  pixel_count INTEGER NOT NULL DEFAULT 0,
+                  note TEXT,
+                  focus_json TEXT,
+                  pixels_json TEXT,
+                  created_at INTEGER NOT NULL,
+                  state TEXT NOT NULL DEFAULT 'active',
+                  veto_reason TEXT,
+                  vetoed_at INTEGER,
+                  redo_seconds INTEGER
+                )
+                """
+            )
+            self.conn.execute(
+                """
+                INSERT INTO actions_v2 (
+                  id, day_id, agent_id, slice_index, round_index, action, done,
+                  pixel_count, note, focus_json, pixels_json, created_at, state
+                )
+                SELECT
+                  id, day_id, agent_id, slice_index, round_index, action, done,
+                  pixel_count, note, focus_json, pixels_json, created_at, 'active'
+                FROM actions
+                """
+            )
+            self.conn.execute("DROP TABLE actions")
+            self.conn.execute("ALTER TABLE actions_v2 RENAME TO actions")
+            max_id = self.conn.execute("SELECT COALESCE(MAX(id), 0) AS n FROM actions").fetchone()["n"]
+            self.conn.execute("DELETE FROM sqlite_sequence WHERE name IN ('actions', 'actions_v2')")
+            self.conn.execute(
+                "INSERT INTO sqlite_sequence (name, seq) VALUES ('actions', ?)",
+                (max_id,),
+            )
+            self.conn.commit()
+            self.dirty = True
+        except Exception:
+            self.conn.rollback()
+            raise
+
     def _backfill_opens_at(self) -> None:
         rows = self.conn.execute(
             "SELECT id, ny_date FROM days WHERE opens_at IS NULL OR opens_at = 0"
@@ -670,14 +801,37 @@ class Store:
         return start
 
     def _acted_at(self, day_id: int) -> dict[int, datetime]:
+        acted, _redos = self._slice_timing(day_id)
+        return acted
+
+    def _slice_timing(self, day_id: int) -> tuple[dict[int, datetime], dict[int, RedoWindow]]:
+        """Original close times, plus a redo window for every vetoed slice.
+
+        The first stored attempt is when the slice closed. A veto does not
+        erase that close. The redo's paint or pass, when it exists, is a
+        later active row.
+        """
         rows = self.conn.execute(
-            "SELECT slice_index, created_at FROM actions WHERE day_id = ?",
+            "SELECT * FROM actions WHERE day_id = ? ORDER BY id ASC",
             (day_id,),
         ).fetchall()
-        return {
-            int(row["slice_index"]): datetime.fromtimestamp(int(row["created_at"]), timezone.utc)
-            for row in rows
-        }
+        acted: dict[int, datetime] = {}
+        redos: dict[int, RedoWindow] = {}
+        for row in rows:
+            index = int(row["slice_index"])
+            created = datetime.fromtimestamp(int(row["created_at"]), timezone.utc)
+            if index not in acted:
+                acted[index] = created
+            if _is_vetoed(row):
+                raw_veto = row["vetoed_at"] if "vetoed_at" in row.keys() else None
+                when = datetime.fromtimestamp(int(raw_veto), timezone.utc) if raw_veto else created
+                stored = row["redo_seconds"] if "redo_seconds" in row.keys() else None
+                seconds = int(stored) if stored is not None else redo_seconds()
+                redos[index] = RedoWindow(when, None, seconds)
+            elif index in redos:
+                window = redos[index]
+                redos[index] = RedoWindow(window.opens, created, window.seconds)
+        return acted, redos
 
     def _design_deadline(self, day: sqlite3.Row) -> datetime:
         created = datetime.fromtimestamp(int(day["created_at"]), timezone.utc)
@@ -740,10 +894,13 @@ class Store:
             if now < deadline:
                 return self._awaiting_clock(deadline, total)
             return walk_session(self._opens_at(day), {}, now, slice_count=total)
-        acted = self._acted_at(day["id"])
+        acted, redos = self._slice_timing(day["id"])
         order = json.loads(day["artist_order_json"]) if day["artist_order_json"] else self._order_for(day)
         rows = self.conn.execute(
-            "SELECT agent_id, slice_index, done, created_at FROM actions WHERE day_id = ? AND done = 1",
+            """
+            SELECT agent_id, slice_index, done, created_at FROM actions
+            WHERE day_id = ? AND done = 1 AND state != 'vetoed'
+            """,
             (day["id"],),
         ).fetchall()
         for row in rows:
@@ -758,6 +915,7 @@ class Store:
             gate_seconds=note_gate_seconds(),
             note_at=self._director_note_times(day["id"]),
             slice_count=total,
+            redos=redos,
         )
 
     def _ensure_design_timeout(self) -> None:
@@ -1071,6 +1229,132 @@ class Store:
             "released": released,
         }
 
+    def veto_slice(self, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Ross undoes the slice that just closed and reopens it for that artist.
+
+        Allowed once, and only while the review gate for the next slice is
+        open. The vetoed stroke stays in the ledger with state ``vetoed`` and
+        is left out of every render. The same seat gets a redo of ``TILE_REDO_SECONDS``.
+        """
+        if agent_id != DIRECTOR_ID:
+            raise ApiError(403, "wrong_role", "Only the art director can veto a slice.")
+        if not isinstance(payload, dict):
+            raise ApiError(400, "bad_veto", "Veto body must be an object.")
+        if "slice" not in payload:
+            raise ApiError(400, "bad_veto", "slice is required.")
+        requested = payload.get("slice")
+        if type(requested) is not int:
+            raise ApiError(400, "bad_veto", "slice must be an integer.")
+        reason = _parse_veto_reason(payload.get("reason"))
+        saved: dict[str, Any] = {}
+
+        def mutate() -> None:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                now = self.now()
+                day = self.today_row()
+                if day is None:
+                    raise ApiError(409, "no_day", "No canvas is open.")
+                if not day["theme"]:
+                    raise ApiError(409, "awaiting_design", "Post the design before vetoing a slice.")
+                total = self._slice_total(day)
+                if requested < 0 or requested >= total:
+                    raise ApiError(400, "bad_veto", f"slice must be an integer from 0 through {total - 1}.")
+                if self._vetoed_row(day["id"], requested) is not None:
+                    raise ApiError(
+                        409,
+                        "already_vetoed",
+                        f"Slice {requested} was already vetoed. A slice can be vetoed once.",
+                    )
+                clock = self._session_clock(day, now)
+                closed = self._gate_closed_index(clock)
+                if closed is None or requested != closed:
+                    raise ApiError(
+                        409,
+                        "not_in_gate",
+                        "A veto is only allowed for the most recently closed slice "
+                        "while its review gate is open, before the next slice starts.",
+                    )
+                action = self._action_for_slice(day["id"], requested)
+                if action is None:
+                    raise ApiError(
+                        409,
+                        "nothing_to_veto",
+                        "That slice has no paint or pass to veto.",
+                    )
+                window = redo_seconds()
+                stamp = int(now.timestamp())
+                restored = self._canvas_without_action(day, int(action["id"]))
+                self.conn.execute(
+                    """
+                    UPDATE actions
+                    SET state = 'vetoed', veto_reason = ?, vetoed_at = ?, redo_seconds = ?
+                    WHERE id = ?
+                    """,
+                    (reason, stamp, window, int(action["id"])),
+                )
+                self._bump_canvas_rev(day["id"])
+                self.conn.execute(
+                    "UPDATE days SET canvas = ? WHERE id = ?",
+                    (restored, day["id"]),
+                )
+                if int(action["pixel_count"]):
+                    self.conn.execute(
+                        """
+                        UPDATE artist_state
+                        SET pixels_used = MAX(0, pixels_used - ?)
+                        WHERE day_id = ? AND agent_id = ?
+                        """,
+                        (int(action["pixel_count"]), day["id"], action["agent_id"]),
+                    )
+                if int(action["done"]):
+                    self.conn.execute(
+                        """
+                        UPDATE artist_state SET skipped = 0
+                        WHERE day_id = ? AND agent_id = ?
+                        """,
+                        (day["id"], action["agent_id"]),
+                    )
+                # The first open and the close of the vetoed attempt already
+                # woke their seats. Drop those rows so the redo can wake the
+                # artist again, and so the gate after the redo can wake Ross.
+                self.conn.execute(
+                    """
+                    DELETE FROM wakes
+                    WHERE day_id = ? AND slice_index = ? AND event = 'slice_open' AND seat_id = ?
+                    """,
+                    (day["id"], requested, action["agent_id"]),
+                )
+                self.conn.execute(
+                    """
+                    DELETE FROM wakes
+                    WHERE day_id = ? AND slice_index = ? AND event = 'slice_closed'
+                    """,
+                    (day["id"], requested),
+                )
+                self.conn.commit()
+                self.dirty = True
+                saved["day_id"] = int(day["id"])
+                saved["agent_id"] = action["agent_id"]
+                saved["ends_at_unix"] = stamp + window
+                saved["redo_seconds"] = window
+            except Exception:
+                self.conn.rollback()
+                raise
+
+        self._run_write(mutate)
+        self._dispatch_quietly()
+        return {
+            "ok": True,
+            "day_id": saved["day_id"],
+            "slice": requested,
+            "redo": True,
+            "redo_seconds": saved["redo_seconds"],
+            "agent_id": saved["agent_id"],
+            "ends_at_unix": saved["ends_at_unix"],
+            "veto_note": reason,
+        }
+
     def ross_view(self) -> dict[str, Any]:
         self._ensure_design_timeout()
         with self.lock:
@@ -1083,6 +1367,15 @@ class Store:
             view = self._ross_from(day, now)
         self._dispatch_quietly()
         return view
+
+    def _gate_closed_index(self, clock: SessionClock) -> int | None:
+        """Slice that just closed, while the next slice's review gate is open."""
+        if clock.phase != "holding" or clock.holding_index is None:
+            return None
+        closed = clock.holding_index - 1
+        if closed < 0:
+            return None
+        return closed
 
     def _note_target(self, day: sqlite3.Row, now: datetime, requested: Any) -> int:
         clock = self._session_clock(day, now)
@@ -1146,9 +1439,7 @@ class Store:
         elif clock.phase == "before":
             reason = "before_routine"
         note_slice = clock.index if clock.index is not None else pending
-        preview = None
-        if day["canvas"] is not None:
-            preview = f"/watch/canvas.png?day_id={day['id']}&scale=2"
+        preview = _png_url(day, 2)
         return {
             "role": DIRECTOR_ID,
             "to_act": to_act,
@@ -1347,6 +1638,8 @@ class Store:
                         "UPDATE days SET canvas = ?, focus_json = ? WHERE id = ?",
                         (bytes(canvas), json.dumps(focus_map), day["id"]),
                     )
+                    if self._session_clock(day, now).slices[index].redo:
+                        self._bump_canvas_rev(day["id"])
                     self._add_pixels(day["id"], agent_id, charged)
                 else:
                     done = bool(payload.get("done", False))
@@ -1542,15 +1835,8 @@ class Store:
         focus = None
         if day and day["focus_json"]:
             focus = json.loads(day["focus_json"]).get(agent_id)
-        preview = None
-        crop_url = None
-        if day and day["canvas"] is not None:
-            preview = f"/watch/canvas.png?day_id={day['id']}&scale=3"
-            if focus:
-                crop_url = (
-                    f"/watch/crop.png?day_id={day['id']}"
-                    f"&x={focus['x']}&y={focus['y']}&w={focus['w']}&h={focus['h']}&scale=4"
-                )
+        preview = _png_url(day, 3) if day is not None else None
+        crop_url = _crop_url(day, focus) if day is not None else None
         strokes = self._recent_strokes(day["id"], include_latest_pixels=True) if day else []
         note_slice = index
         if day is not None and note_slice is None:
@@ -1558,6 +1844,15 @@ class Store:
             if clock.phase == "holding" and clock.holding_index is not None:
                 note_slice = clock.holding_index
         director_note = self._visible_note(day["id"], note_slice) if day else None
+        redo = False
+        veto_note = None
+        if day is not None and phase == "during" and index is not None:
+            live = self._session_clock(day, now)
+            if live.slices[index].redo:
+                redo = True
+                owner = artist_on_slice(order, index)
+                if agent_id == owner:
+                    veto_note = self._veto_note(day["id"], index)
         return {
             "mural_id": f"day-{day['day_index']}" if day else None,
             "day_id": day["id"] if day else None,
@@ -1567,6 +1862,8 @@ class Store:
             "theme": day["theme"] if day else None,
             "brief": day["brief"] if day else None,
             "director_note": director_note,
+            "redo": redo,
+            "veto_note": veto_note,
             "palette": palette,
             "grid_w": GRID,
             "grid_h": GRID,
@@ -1681,8 +1978,11 @@ class Store:
             return []
         clock = self._session_clock(day, now)
         note = None
+        veto_note = None
         if day["theme"] and clock.phase == "during" and clock.index is not None:
             note = self._visible_note(int(day["id"]), clock.index)
+            if clock.slices[clock.index].redo:
+                veto_note = self._veto_note(int(day["id"]), clock.index)
         return plan_wakes(
             day_id=int(day["id"]),
             theme=bool(day["theme"]),
@@ -1699,6 +1999,8 @@ class Store:
             director_note=note,
             design_deadline=None if day["theme"] else self._design_deadline(day),
             holding_index=clock.holding_index,
+            veto_note=veto_note,
+            render_rev=_canvas_rev(day),
         )
 
     def _post_and_finish(self, intent: WakeIntent) -> dict[str, Any]:
@@ -1948,11 +2250,19 @@ class Store:
             current = artist_on_slice(order, index)
             clock = self._session_clock(day, now)
             slice_end = clock.deadline or clock.lock_at
-            hint = (
-                f"GET /agent/turn as {current}, then POST /agent/act with one paint or pass "
-                f"before {label_hhmm(slice_end)} ET. This slice is 3 minutes, and the next "
-                f"artist opens as soon as you act."
-            )
+            live = clock.slices[index] if index is not None else None
+            if live is not None and live.redo:
+                hint = (
+                    f"GET /agent/turn as {current}, then POST /agent/act with one paint or pass "
+                    f"before {label_hhmm(slice_end)} ET. This redo replaces the vetoed slice. "
+                    f"The review gate runs after it closes."
+                )
+            else:
+                hint = (
+                    f"GET /agent/turn as {current}, then POST /agent/act with one paint or pass "
+                    f"before {label_hhmm(slice_end)} ET. This slice is 3 minutes, and the next "
+                    f"artist opens as soon as you act."
+                )
         return {
             "ok": True,
             "phase": public_phase,
@@ -2101,9 +2411,7 @@ class Store:
         current = None
         if is_live and phase == "during" and featured["theme"] and index is not None:
             current = artist_on_slice(order, index)
-        preview = None
-        if featured["canvas"] is not None:
-            preview = f"/watch/canvas.png?day_id={featured['id']}&scale=3"
+        preview = _png_url(featured, 3)
         focus = None
         if featured["focus_json"]:
             focus_map = json.loads(featured["focus_json"])
@@ -2148,12 +2456,7 @@ class Store:
             "demo_seed": bool(featured["demo_seed"]),
             "preview_url": preview,
             "focus": focus,
-            "focus_crop_url": (
-                f"/watch/crop.png?day_id={featured['id']}&x={focus['x']}&y={focus['y']}"
-                f"&w={focus['w']}&h={focus['h']}&scale=4"
-                if focus
-                else None
-            ),
+            "focus_crop_url": _crop_url(featured, focus),
             "current_agent_id": current,
             "current_display_name": DISPLAY[current] if current else None,
             "round_index": round_on_slice(live_index) if live_index is not None else None,
@@ -2286,6 +2589,7 @@ class Store:
                     "done": bool(row["done"]),
                     "pixel_count": row["pixel_count"],
                     "note": row["note"],
+                    "state": row["state"] if "state" in row.keys() and row["state"] else "active",
                     "pixels": json.loads(row["pixels_json"]) if row["pixels_json"] else [],
                     "created_at_unix": row["created_at"],
                 }
@@ -2352,11 +2656,11 @@ class Store:
             return stored, palette
         canvas = blank_canvas()
         rows = self.conn.execute(
-            "SELECT slice_index, pixels_json FROM actions WHERE day_id = ? ORDER BY id ASC",
+            "SELECT slice_index, pixels_json, state FROM actions WHERE day_id = ? ORDER BY id ASC",
             (day_id,),
         ).fetchall()
         for row in rows:
-            if row["slice_index"] not in wanted or not row["pixels_json"]:
+            if _is_vetoed(row) or row["slice_index"] not in wanted or not row["pixels_json"]:
                 continue
             for pixel in json.loads(row["pixels_json"]):
                 if not isinstance(pixel, dict):
@@ -2440,10 +2744,80 @@ class Store:
         )
 
     def _action_for_slice(self, day_id: int, index: int) -> sqlite3.Row | None:
+        """The live attempt on a slice. A vetoed row stays in the table for audit."""
         return self.conn.execute(
-            "SELECT * FROM actions WHERE day_id = ? AND slice_index = ?",
+            """
+            SELECT * FROM actions
+            WHERE day_id = ? AND slice_index = ? AND state != 'vetoed'
+            ORDER BY id DESC LIMIT 1
+            """,
             (day_id, index),
         ).fetchone()
+
+    def _vetoed_row(self, day_id: int, index: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            """
+            SELECT * FROM actions
+            WHERE day_id = ? AND slice_index = ? AND state = 'vetoed'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (day_id, index),
+        ).fetchone()
+
+    def _veto_note(self, day_id: int, index: int) -> str | None:
+        row = self._vetoed_row(day_id, index)
+        if row is None or "veto_reason" not in row.keys():
+            return None
+        reason = row["veto_reason"]
+        return reason if isinstance(reason, str) and reason else None
+
+    def _bump_canvas_rev(self, day_id: int) -> None:
+        self.conn.execute(
+            "UPDATE days SET canvas_rev = COALESCE(canvas_rev, 0) + 1 WHERE id = ?",
+            (day_id,),
+        )
+
+    def _opening_canvas(self, day: sqlite3.Row) -> bytes:
+        if int(day["demo_seed"] or 0):
+            canvas = blank_canvas()
+            draw_cabin(canvas)
+            return bytes(canvas)
+        return bytes(blank_canvas())
+
+    def _canvas_without_action(self, day: sqlite3.Row, action_id: int) -> bytes:
+        """Pixels as they were before ``action_id``, including earlier overwrites.
+
+        Replaying the ledger onto the opening canvas is the source of truth
+        when that replay still matches the stored painting. A demo cabin or
+        any other pixel that never went through an action stays put: those
+        cells are restored from the opening canvas only where this action
+        painted them, and from the previous stroke where it overwrote one.
+        """
+        stored = bytes(day["canvas"])
+        base = self._opening_canvas(day)
+        rows = self.conn.execute(
+            "SELECT * FROM actions WHERE day_id = ? ORDER BY id ASC",
+            (day["id"],),
+        ).fetchall()
+        active = [row for row in rows if not _is_vetoed(row)]
+        if _replay_actions(base, active) == stored:
+            kept = [row for row in active if int(row["id"]) != action_id]
+            return _replay_actions(base, kept)
+        prior: dict[tuple[int, int], int] = {}
+        painted: list[tuple[int, int]] = []
+        for row in rows:
+            if int(row["id"]) == action_id:
+                painted = [(pixel["x"], pixel["y"]) for pixel in _iter_pixels(row["pixels_json"])]
+                break
+            if _is_vetoed(row):
+                continue
+            for pixel in _iter_pixels(row["pixels_json"]):
+                prior[(pixel["x"], pixel["y"])] = pixel["color"]
+        canvas = bytearray(stored)
+        for x, y in painted:
+            offset = y * GRID + x
+            canvas[offset] = prior.get((x, y), base[offset])
+        return bytes(canvas)
 
     def _turns_remaining(self, day: sqlite3.Row | None, agent_id: str, now: datetime) -> int:
         if day is None:
@@ -2491,7 +2865,11 @@ class Store:
 
     def _recent_strokes(self, day_id: int, include_latest_pixels: bool) -> list[dict[str, Any]]:
         rows = self.conn.execute(
-            "SELECT * FROM actions WHERE day_id = ? ORDER BY id DESC LIMIT 6",
+            """
+            SELECT * FROM actions
+            WHERE day_id = ? AND state != 'vetoed'
+            ORDER BY id DESC LIMIT 6
+            """,
             (day_id,),
         ).fetchall()
         strokes = []
@@ -2526,13 +2904,17 @@ class Store:
         holding_index: int | None = None,
     ) -> list[dict[str, Any]]:
         clock = self._session_clock(day, now)
-        actions = {
-            row["slice_index"]: row
-            for row in self.conn.execute(
-                "SELECT * FROM actions WHERE day_id = ?",
-                (day["id"],),
-            ).fetchall()
-        }
+        actions: dict[int, sqlite3.Row] = {}
+        vetoes: dict[int, sqlite3.Row] = {}
+        for row in self.conn.execute(
+            "SELECT * FROM actions WHERE day_id = ? ORDER BY id ASC",
+            (day["id"],),
+        ).fetchall():
+            index = int(row["slice_index"])
+            if _is_vetoed(row):
+                vetoes[index] = row
+            else:
+                actions[index] = row
         skip_from: dict[str, int] = {}
         for row in actions.values():
             if row["done"]:
@@ -2558,6 +2940,28 @@ class Store:
                 state = "active"
             else:
                 state = "upcoming"
+            history: list[dict[str, Any]] = []
+            vetoed = vetoes.get(index)
+            if vetoed is not None:
+                history.append(
+                    {
+                        "state": "vetoed",
+                        "action": vetoed["action"],
+                        "pixel_count": vetoed["pixel_count"],
+                        "removed": True,
+                    }
+                )
+            if action is not None:
+                history.append(
+                    {
+                        "state": "done",
+                        "action": action["action"],
+                        "pixel_count": action["pixel_count"],
+                        "removed": False,
+                    }
+                )
+            pixel_count = action["pixel_count"] if action else 0
+            removed = vetoed is not None and not pixel_count
             board.append(
                 {
                     "index": index,
@@ -2567,8 +2971,11 @@ class Store:
                     "starts": label_hhmm(begin),
                     "ends": label_hhmm(end),
                     "state": state,
-                    "pixel_count": action["pixel_count"] if action else 0,
+                    "pixel_count": pixel_count,
                     "action": action["action"] if action else None,
+                    "redo": bool(mark.redo),
+                    "removed": removed,
+                    "history": history,
                 }
             )
         return board
@@ -2582,9 +2989,7 @@ class Store:
             "kind": row["kind"],
             "status": self._status(row, now),
             "archived": bool(row["archived"]),
-            "preview_url": (
-                f"/watch/canvas.png?day_id={row['id']}&scale=2" if row["canvas"] is not None else None
-            ),
+            "preview_url": _png_url(row, 2),
             "open_url": f"/canvas/{row['id']}",
         }
 
@@ -2729,6 +3134,83 @@ def _status_message(status: str, slice_count: int | None = None) -> str:
         "missed": "The morning passed without a design. Tomorrow starts blank.",
         "scheduled": "This canvas is scheduled.",
     }.get(status, status)
+
+
+def _is_vetoed(row: sqlite3.Row) -> bool:
+    if "state" not in row.keys():
+        return False
+    return row["state"] == "vetoed"
+
+
+def _canvas_rev(day: sqlite3.Row | None) -> int:
+    if day is None or "canvas_rev" not in day.keys() or day["canvas_rev"] is None:
+        return 0
+    return int(day["canvas_rev"])
+
+
+def _png_url(day: sqlite3.Row | None, scale: int) -> str | None:
+    if day is None or day["canvas"] is None:
+        return None
+    url = f"/watch/canvas.png?day_id={day['id']}&scale={scale}"
+    rev = _canvas_rev(day)
+    if rev:
+        url += f"&v={rev}"
+    return url
+
+
+def _crop_url(day: sqlite3.Row | None, focus: dict[str, int] | None) -> str | None:
+    if day is None or not focus or day["canvas"] is None:
+        return None
+    url = (
+        f"/watch/crop.png?day_id={day['id']}&x={focus['x']}&y={focus['y']}"
+        f"&w={focus['w']}&h={focus['h']}&scale=4"
+    )
+    rev = _canvas_rev(day)
+    if rev:
+        url += f"&v={rev}"
+    return url
+
+
+def _iter_pixels(raw: str | None) -> list[dict[str, int]]:
+    if not raw:
+        return []
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+    pixels = []
+    for pixel in payload:
+        if not isinstance(pixel, dict):
+            continue
+        x, y, color = pixel.get("x"), pixel.get("y"), pixel.get("color")
+        if type(x) is not int or type(y) is not int or type(color) is not int:
+            continue
+        if 0 <= x < GRID and 0 <= y < GRID and 0 <= color <= 255:
+            pixels.append({"x": x, "y": y, "color": color})
+    return pixels
+
+
+def _replay_actions(base: bytes, rows: list[sqlite3.Row]) -> bytes:
+    canvas = bytearray(base)
+    for row in rows:
+        for pixel in _iter_pixels(row["pixels_json"]):
+            canvas[pixel["y"] * GRID + pixel["x"]] = pixel["color"]
+    return bytes(canvas)
+
+
+def _parse_veto_reason(raw: Any) -> str | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ApiError(400, "bad_veto", "reason must be a string.")
+    text = raw.strip()
+    if not text:
+        return None
+    if len(text) > VETO_REASON_MAX:
+        raise ApiError(400, "bad_veto", f"reason must be {VETO_REASON_MAX} characters or fewer.")
+    return text
 
 
 def _parse_director_note(raw: Any) -> str:

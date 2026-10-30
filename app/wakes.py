@@ -96,6 +96,13 @@ class WakeIntent:
     attempts: int = 0
 
 
+def _render_url(day_id: int, rev: int) -> str:
+    url = f"/watch/canvas.png?day_id={day_id}&scale=2"
+    if rev:
+        url += f"&v={rev}"
+    return url
+
+
 def public_base_url() -> str:
     raw = os.environ.get("TILE_PUBLIC_BASE_URL", "").strip().rstrip("/")
     if raw:
@@ -201,6 +208,8 @@ def plan_wakes(
     director_note: str | None = None,
     design_deadline: datetime | None = None,
     holding_index: int | None = None,
+    veto_note: str | None = None,
+    render_rev: int = 0,
 ) -> list[WakeIntent]:
     """Wakes that are still in their delivery window.
 
@@ -221,7 +230,14 @@ def plan_wakes(
                 by_event[event].append(hook)
     intents: list[WakeIntent] = []
 
-    def add(hook: SeatHook, event: str, slice_index: int, ends_at: datetime) -> None:
+    def add(
+        hook: SeatHook,
+        event: str,
+        slice_index: int,
+        ends_at: datetime,
+        *,
+        redo: bool = False,
+    ) -> None:
         payload: dict[str, Any] = {
             "event": event,
             "day_id": day_id,
@@ -233,11 +249,14 @@ def plan_wakes(
         if event == "slice_open":
             payload["brief"] = brief or ""
             payload["director_note"] = director_note
+            if redo:
+                payload["redo"] = True
+                payload["veto_note"] = veto_note
         elif event == "slice_closed" and slice_index >= 0:
             nxt = slice_index + 1
             payload["next_slice"] = nxt if slices and nxt < len(slices) else None
         if event in ("slice_closed", "canvas_locked") or hook.seat_id == "ross":
-            payload["render_url"] = f"/watch/canvas.png?day_id={day_id}&scale=2"
+            payload["render_url"] = _render_url(day_id, render_rev)
         intents.append(
             WakeIntent(
                 day_id=day_id,
@@ -272,7 +291,7 @@ def plan_wakes(
         mark = slices[index]
         for hook in by_event["slice_open"]:
             if hook.seat_id == seat:
-                add(hook, "slice_open", index, mark.deadline)
+                add(hook, "slice_open", index, mark.deadline, redo=mark.redo)
         if index > 0:
             prev = slices[index - 1]
             if prev.acted or prev.missed:
