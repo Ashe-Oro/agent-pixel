@@ -24,7 +24,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from app.schedule import SLICE_COUNT, SLICE_SECONDS, SliceMark, artist_on_slice
+from app.schedule import SLICE_SECONDS, SliceMark, artist_on_slice
 
 ALLOWED_EVENTS = (
     "slice_open",
@@ -235,7 +235,7 @@ def plan_wakes(
             payload["director_note"] = director_note
         elif event == "slice_closed" and slice_index >= 0:
             nxt = slice_index + 1
-            payload["next_slice"] = nxt if nxt < SLICE_COUNT else None
+            payload["next_slice"] = nxt if slices and nxt < len(slices) else None
         if event in ("slice_closed", "canvas_locked") or hook.seat_id == "ross":
             payload["render_url"] = f"/watch/canvas.png?day_id={day_id}&scale=2"
         intents.append(

@@ -92,10 +92,8 @@
     }
     .slices {
       display: grid;
-      grid-auto-flow: column;
-      grid-auto-columns: minmax(86px, 1fr);
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 8px;
-      overflow-x: auto;
       padding-bottom: 6px;
     }
     .slice {
@@ -192,8 +190,7 @@
       outline: 2px solid var(--gold);
       outline-offset: 2px;
     }
-    .slices { scroll-snap-type: x proximity; }
-    .slice { scroll-snap-align: start; }
+    .slice { min-width: 0; }
     main {
       display: grid;
       grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.8fr);
@@ -345,7 +342,7 @@
       <div>
         <p class="eyebrow">Daily pixel mural</p>
         <h1>Agent Pixel</h1>
-        <p class="lede">Three artists share one brush. A new 256×256 canvas opens at 8:00 ET. Each slice is 3 minutes, and the morning locks after at most 36 minutes.</p>
+        <p class="lede" id="lede">Three artists share one brush. A new 256×256 canvas opens at 8:00 ET. Each slice is 3 minutes, and the morning locks after at most 54 minutes.</p>
       </div>
     </div>
     <div class="clock" id="clock">
@@ -377,7 +374,7 @@
     </div>
     <aside id="panel">
       <h2>Waiting for the design</h2>
-      <p class="brief">The art director publishes a theme and 16 colors. Then Claude, Grok Artist, and OpenAI each take four 3-minute turns.</p>
+      <p class="brief">The art director publishes a theme and 16 colors. Then Claude, Grok Artist, and OpenAI each take six 3-minute turns.</p>
     </aside>
   </main>
   <section class="chatter">
@@ -571,12 +568,19 @@
       paintPreview(data);
       paintChat(data);
 
+      const schedule = data.schedule || {};
+      const lede = document.getElementById("lede");
+      if (lede && schedule.session_length) {
+        const sliceMinutes = schedule.slice_minutes || 3;
+        lede.textContent = `Three artists share one brush. A new 256×256 canvas opens at 8:00 ET. Each slice is ${sliceMinutes} minutes, and the morning locks after at most ${schedule.session_length}.`;
+      }
       const active = (data.artists || []).find((artist) => artist.to_act);
       const panelBits = [];
+      const roundTotal = schedule.rounds || "";
       panelBits.push(`<h2>${esc(data.theme || "No theme yet")}</h2>`);
       panelBits.push(`<p class="brief">${esc(data.message || "")}</p>`);
       if (data.status === "painting" && data.current_display_name) {
-        panelBits.push(`<p class="status-line">${esc(data.current_display_name)} holds the brush · round ${esc(data.round_index)} of 4</p>`);
+        panelBits.push(`<p class="status-line">${esc(data.current_display_name)} holds the brush · round ${esc(data.round_index)} of ${esc(roundTotal)}</p>`);
       } else if (data.status === "locked") {
         panelBits.push(`<p class="status-line">Locked. The next morning starts blank.</p>`);
       } else if (data.status === "awaiting_design") {

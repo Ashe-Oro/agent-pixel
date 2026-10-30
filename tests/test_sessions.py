@@ -149,7 +149,7 @@ def test_host_bonus_canvas_steps_without_a_fake_date(client):
     stepped = client.post("/host/clock", headers=host(), json={"mode": "next_slice"})
     assert stepped.status_code == 200, stepped.text
     assert client.get("/agent/turn", headers=auth(third_artist)).json()["to_act"] is True
-    assert len(client.get("/watch/state").json()["slices"]) == 12
+    assert len(client.get("/watch/state").json()["slices"]) == 18
     second = client.post("/host/canvas/new", headers=host())
     assert second.status_code == 200, second.text
     assert second.json()["day"]["ny_date"] == "2026-10-28"
@@ -182,7 +182,7 @@ def test_gallery_orders_by_creation_and_hides_never_designed_days(client):
     client.app.state.store.conn.execute(
         "INSERT INTO days (day_index, ny_date, created_at, opens_at, kind) VALUES (99, '2026-10-28', 1, 1, 'legacy')"
     )
-    pin(client, "2026-10-25T08:36:00")
+    pin(client, "2026-10-25T08:54:00")
     gallery = client.get("/watch/gallery").json()["canvases"]
     assert [item["theme"] for item in gallery][:1] == ["Pepe"]
     assert gallery[0]["day_id"] == pepe_id
@@ -343,6 +343,16 @@ def test_migration_keeps_existing_ids_without_requiring_day_one(tmp_path):
         home = client.get("/watch/state").json()
         assert home["day_id"] == 6
         assert home["theme"] == "Pepe"
+        assert len(home["slices"]) == 12
+        assert home["schedule"]["rounds"] == 4
+        assert home["schedule"]["slices"] == 12
+        assert home["schedule"]["locks"] == "08:36"
+        counts = {
+            row["id"]: row["slice_count"]
+            for row in client.app.state.store.conn.execute("SELECT id, slice_count FROM days")
+        }
+        assert counts[2] == 12
+        assert counts[6] == 12
         gallery = client.get("/watch/gallery").json()["canvases"]
         assert [item["day_id"] for item in gallery] == [6, 2]
         ledger = client.get("/host/days/2/ledger", headers=host()).json()
@@ -352,6 +362,166 @@ def test_migration_keeps_existing_ids_without_requiring_day_one(tmp_path):
         bonus = client.post("/host/canvas/new", headers=host())
         assert bonus.status_code == 200, bonus.text
         assert bonus.json()["day"]["day_id"] == 7
+        board = client.get("/watch/state").json()
+        assert board["day_id"] == 7
+        assert len(board["slices"]) == 18
+        assert board["schedule"]["rounds"] == 6
+        assert board["schedule"]["locks"] == "08:54"
+        kept = client.get("/watch/state", params={"day_id": 6}).json()
+        assert len(kept["slices"]) == 12
+        assert kept["schedule"]["rounds"] == 4
+        assert kept["schedule"]["locks"] == "08:36"
+    app.state.store.close()
+
+
+def test_in_progress_twelve_slice_canvas_finishes_on_its_count(tmp_path, monkeypatch):
+    """A morning already running with 12 slices keeps that clock after deploy."""
+    db_path = tmp_path / "live.db"
+    conn = sqlite3.connect(db_path)
+    opens, _ = day_bounds(datetime(2026, 10, 28).date(), slice_count=12)
+    pinned = (opens + timedelta(minutes=30)).astimezone(timezone.utc).replace(microsecond=0)
+    conn.executescript(
+        """
+        CREATE TABLE settings (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          clock_utc TEXT,
+          roster_json TEXT NOT NULL,
+          rotate INTEGER NOT NULL DEFAULT 1,
+          pixels_per_turn INTEGER NOT NULL DEFAULT 0,
+          pixels_per_artist_day INTEGER NOT NULL DEFAULT 0,
+          morning_opened TEXT,
+          morning_due TEXT
+        );
+        CREATE TABLE days (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          day_index INTEGER NOT NULL UNIQUE,
+          ny_date TEXT NOT NULL,
+          theme TEXT,
+          brief TEXT,
+          palette_json TEXT,
+          canvas BLOB,
+          artist_order_json TEXT,
+          focus_json TEXT,
+          demo_seed INTEGER NOT NULL DEFAULT 0,
+          designed_at INTEGER,
+          created_at INTEGER NOT NULL,
+          opens_at INTEGER NOT NULL DEFAULT 0,
+          kind TEXT NOT NULL DEFAULT 'legacy',
+          archived INTEGER NOT NULL DEFAULT 0,
+          archived_at INTEGER
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO settings (id, clock_utc, roster_json, rotate, pixels_per_turn, pixels_per_artist_day, morning_opened)
+        VALUES (1, ?, ?, 1, 0, 0, '2026-10-28')
+        """,
+        (pinned.isoformat(), '["claude","grok-artist","openai"]'),
+    )
+    canvas = bytearray(256 * 256)
+    canvas[0] = 3
+    conn.execute(
+        """
+        INSERT INTO days (
+          id, day_index, ny_date, theme, brief, palette_json, canvas, artist_order_json,
+          designed_at, created_at, opens_at, kind
+        ) VALUES (4, 4, '2026-10-28', 'Harbor', 'brief', ?, ?, ?, ?, ?, ?, 'morning')
+        """,
+        (
+            __import__("json").dumps(DESIGN["palette"]),
+            bytes(canvas),
+            '["claude","grok-artist","openai"]',
+            int(opens.timestamp()),
+            int(opens.timestamp()),
+            int(opens.timestamp()),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    app = create_app(
+        Settings(
+            db_path=db_path,
+            api_key="test-key",
+            seed=False,
+            pin_morning=False,
+            skill_path=ROOT / "skill.md",
+            seat_tokens={},
+        )
+    )
+    with TestClient(app) as client:
+        stored = client.app.state.store.conn.execute(
+            "SELECT slice_count FROM days WHERE id = 4"
+        ).fetchone()
+        assert stored["slice_count"] == 12
+        state = client.get("/watch/state").json()
+        assert state["day_id"] == 4
+        assert state["status"] == "painting"
+        assert len(state["slices"]) == 12
+        assert state["slice_index"] == 10
+        assert state["round_index"] == 4
+        assert state["schedule"]["slices"] == 12
+        assert state["schedule"]["rounds"] == 4
+        assert state["schedule"]["locks"] == "08:36"
+        assert state["schedule"]["session_minutes"] == 36
+        grok = client.get("/agent/turn", headers=auth("grok-artist")).json()
+        assert grok["to_act"] is True
+        assert grok["turns_remaining"] == 1
+        assert grok["round_index"] == 4
+        page = client.get("/canvas/4")
+        assert page.status_code == 200
+        assert "54 minutes" in page.text
+        assert "of 4" not in page.text
+        archive = client.get("/watch/state", params={"day_id": 4}).json()
+        assert len(archive["slices"]) == 12
+        every = ",".join(str(index) for index in range(12))
+        full = client.get("/watch/canvas.png", params={"day_id": 4, "slices": every, "scale": 1})
+        plain = client.get("/watch/canvas.png", params={"day_id": 4, "scale": 1})
+        assert full.status_code == 200
+        assert full.content == plain.content
+        rejected = client.get("/watch/canvas.png", params={"day_id": 4, "slices": "12"})
+        assert rejected.status_code == 400
+        assert rejected.json()["error"] == "bad_slices"
+
+        pin(client, "2026-10-28T08:36:00")
+        locked = client.get("/watch/state").json()
+        assert locked["status"] == "locked"
+        assert len(locked["slices"]) == 12
+        assert "36 minutes" in locked["message"]
+        late = client.post(
+            "/agent/act",
+            headers=auth("grok-artist"),
+            json={"type": "pass"},
+        )
+        assert late.status_code == 409
+
+        monkeypatch.setenv("TILE_ROUNDS", "2")
+        opened = client.post("/host/canvas/new", headers=host())
+        assert opened.status_code == 200, opened.text
+        assert opened.json()["day"]["day_id"] != 4
+        fresh = client.get("/watch/state").json()
+        assert fresh["day_id"] != 4
+        assert len(fresh["slices"]) == 6
+        assert fresh["schedule"]["rounds"] == 2
+        assert fresh["schedule"]["slices"] == 6
+        assert fresh["schedule"]["locks"] == "08:18"
+        assert fresh["schedule"]["session_minutes"] == 18
+        designed = client.post("/agent/design", headers=auth("design"), json=DESIGN)
+        assert designed.status_code == 200, designed.text
+        turn = client.get("/agent/turn", headers=auth("claude")).json()
+        assert turn["turns_remaining"] == 2
+        assert turn["round_index"] == 1
+        history = client.get("/watch/state", params={"day_id": 4}).json()
+        assert history["status"] == "locked"
+        assert len(history["slices"]) == 12
+        assert history["schedule"]["rounds"] == 4
+        assert history["schedule"]["locks"] == "08:36"
+        assert "36 minutes" in history["message"]
+        still = client.app.state.store.conn.execute(
+            "SELECT slice_count FROM days WHERE id = 4"
+        ).fetchone()
+        assert still["slice_count"] == 12
     app.state.store.close()
 
 

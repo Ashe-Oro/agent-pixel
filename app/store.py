@@ -40,24 +40,29 @@ from app.schedule import (
     ARTISTS,
     DISPLAY,
     GRID,
+    LEGACY_SLICE_COUNT,
     PIXELS_PER_ARTIST_DAY,
     PIXELS_PER_TURN,
-    SESSION_SECONDS,
-    SLICE_COUNT,
     SLICE_SECONDS,
     NY,
     SessionClock,
     artist_on_slice,
+    configured_slice_count,
     day_bounds,
     design_wait_seconds,
     label_clock,
     label_hhmm,
+    lock_label,
     note_gate_seconds,
+    resolve_slice_count,
     ny_date,
     parse_ny_local,
     position,
     rotate,
     round_on_slice,
+    rounds_in,
+    session_length_phrase,
+    session_minutes,
     walk_session,
 )
 
@@ -67,7 +72,7 @@ KIND_LEGACY = "legacy"
 
 # Shared by fresh databases and the in-place rebuild. ny_date is not unique:
 # a morning and a bonus, or a leftover pin and the real morning, can share a date.
-_DAYS_COLUMNS = """
+_DAYS_COLUMNS = f"""
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               day_index INTEGER NOT NULL UNIQUE,
               ny_date TEXT NOT NULL,
@@ -83,7 +88,8 @@ _DAYS_COLUMNS = """
               opens_at INTEGER NOT NULL DEFAULT 0,
               kind TEXT NOT NULL DEFAULT 'legacy',
               archived INTEGER NOT NULL DEFAULT 0,
-              archived_at INTEGER
+              archived_at INTEGER,
+              slice_count INTEGER NOT NULL DEFAULT {LEGACY_SLICE_COUNT}
 """
 
 # Latest-stroke cells stay in TurnView only while the list is small.
@@ -394,6 +400,7 @@ class Store:
         if cleared.rowcount:
             self.dirty = True
         self._migrate_days()
+        self._ensure_slice_count()
         cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(days)")}
         if {"kind", "archived", "ny_date", "id"} <= cols:
             self.conn.execute(
@@ -448,8 +455,8 @@ class Store:
                     INSERT INTO days_v2 (
                       id, day_index, ny_date, theme, brief, palette_json, canvas,
                       artist_order_json, focus_json, demo_seed, designed_at, created_at,
-                      opens_at, kind, archived, archived_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
+                      opens_at, kind, archived, archived_at, slice_count
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
                     """,
                     (
                         row["id"],
@@ -466,6 +473,7 @@ class Store:
                         row["created_at"],
                         opens,
                         KIND_LEGACY,
+                        LEGACY_SLICE_COUNT,
                     ),
                 )
             self.conn.execute("DROP TABLE days")
@@ -501,6 +509,38 @@ class Store:
             if [col["name"] for col in info] == ["ny_date"]:
                 return True
         return False
+
+    def _ensure_slice_count(self) -> None:
+        """Keep each canvas on the slice count it opened with.
+
+        Rows from before ``TILE_ROUNDS`` have no column. They ran twelve
+        slices, including a morning that is still in progress at deploy.
+        New canvases set the column in ``_insert_day``.
+        """
+        cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(days)")}
+        if "slice_count" not in cols:
+            self.conn.execute(
+                f"ALTER TABLE days ADD COLUMN slice_count INTEGER NOT NULL DEFAULT {LEGACY_SLICE_COUNT}"
+            )
+            self.dirty = True
+            return
+        cleared = self.conn.execute(
+            "UPDATE days SET slice_count = ? WHERE slice_count IS NULL OR slice_count < 1",
+            (LEGACY_SLICE_COUNT,),
+        )
+        if cleared.rowcount:
+            self.dirty = True
+
+    def _slice_total(self, day: sqlite3.Row | None) -> int:
+        """Slice count for this canvas, or the current setting when there is no row."""
+        if day is None:
+            return configured_slice_count()
+        if "slice_count" not in day.keys():
+            return LEGACY_SLICE_COUNT
+        stored = int(day["slice_count"] or 0)
+        if stored < 1:
+            return LEGACY_SLICE_COUNT
+        return stored
 
     def _backfill_opens_at(self) -> None:
         rows = self.conn.execute(
@@ -643,9 +683,14 @@ class Store:
         created = datetime.fromtimestamp(int(day["created_at"]), timezone.utc)
         return created + timedelta(seconds=design_wait_seconds())
 
-    def _awaiting_clock(self, deadline: datetime):
+    def _awaiting_clock(self, deadline: datetime, slice_count: int):
         """Slices have not started. The board shows the plan from the design deadline."""
-        projected = walk_session(deadline, {}, deadline - timedelta(seconds=1))
+        projected = walk_session(
+            deadline,
+            {},
+            deadline - timedelta(seconds=1),
+            slice_count=slice_count,
+        )
         return SessionClock(
             phase="awaiting",
             index=None,
@@ -689,11 +734,12 @@ class Store:
         return row["body"] if row else None
 
     def _session_clock(self, day: sqlite3.Row, now: datetime):
+        total = self._slice_total(day)
         if not day["theme"]:
             deadline = self._design_deadline(day)
             if now < deadline:
-                return self._awaiting_clock(deadline)
-            return walk_session(self._opens_at(day), {}, now)
+                return self._awaiting_clock(deadline, total)
+            return walk_session(self._opens_at(day), {}, now, slice_count=total)
         acted = self._acted_at(day["id"])
         order = json.loads(day["artist_order_json"]) if day["artist_order_json"] else self._order_for(day)
         rows = self.conn.execute(
@@ -702,7 +748,7 @@ class Store:
         ).fetchall()
         for row in rows:
             closed = datetime.fromtimestamp(int(row["created_at"]), timezone.utc)
-            for index in range(int(row["slice_index"]) + 1, SLICE_COUNT):
+            for index in range(int(row["slice_index"]) + 1, total):
                 if artist_on_slice(order, index) == row["agent_id"] and index not in acted:
                     acted[index] = closed
         return walk_session(
@@ -711,6 +757,7 @@ class Store:
             now,
             gate_seconds=note_gate_seconds(),
             note_at=self._director_note_times(day["id"]),
+            slice_count=total,
         )
 
     def _ensure_design_timeout(self) -> None:
@@ -734,7 +781,7 @@ class Store:
         deadline = self._design_deadline(row)
         if now < deadline:
             return None
-        if now >= deadline + timedelta(seconds=SESSION_SECONDS):
+        if now >= deadline + timedelta(seconds=self._slice_total(row) * SLICE_SECONDS):
             return None
         return row
 
@@ -798,10 +845,12 @@ class Store:
         stamp = int(opens_at.astimezone(timezone.utc).replace(microsecond=0).timestamp())
         cursor = self.conn.execute(
             """
-            INSERT INTO days (day_index, ny_date, created_at, opens_at, kind, archived)
-            VALUES (?, ?, ?, ?, ?, 0)
+            INSERT INTO days (
+              day_index, ny_date, created_at, opens_at, kind, archived, slice_count
+            )
+            VALUES (?, ?, ?, ?, ?, 0, ?)
             """,
-            (nxt, key, int(now.timestamp()), stamp, kind),
+            (nxt, key, int(now.timestamp()), stamp, kind, configured_slice_count()),
         )
         self.dirty = True
         return self.conn.execute("SELECT * FROM days WHERE id = ?", (cursor.lastrowid,)).fetchone()
@@ -873,7 +922,8 @@ class Store:
         canvas is created on a later tick, once that canvas has locked, and
         its slice clock starts then so it is not born already half over.
         A canvas already open at or after 08:00 counts as this morning: the
-        cron does not start a second one. After 08:36, with nothing waiting,
+        cron does not start a second one. After the latest lock for a new
+        morning (08:54 ET at the default of 6 rounds), with nothing waiting,
         no already-locked canvas is minted.
         """
         start, lock = day_bounds(now.astimezone(NY).date())
@@ -915,7 +965,7 @@ class Store:
         return self.watch_state()
 
     def open_bonus(self) -> dict[str, Any]:
-        """Open a fresh 12-slice session at the current clock, without moving the date."""
+        """Open a fresh session at the current clock, without moving the date."""
 
         def mutate() -> int:
             now = self.now().astimezone(timezone.utc).replace(microsecond=0)
@@ -1036,22 +1086,23 @@ class Store:
 
     def _note_target(self, day: sqlite3.Row, now: datetime, requested: Any) -> int:
         clock = self._session_clock(day, now)
+        total = self._slice_total(day)
         if clock.phase == "after" or int(day["archived"]):
             raise ApiError(409, "morning_locked", "This session is locked.")
         if clock.phase == "holding" and clock.holding_index is not None:
             default = clock.holding_index
         elif clock.phase == "during" and clock.index is not None:
-            default = clock.index if clock.index >= SLICE_COUNT - 1 else clock.index + 1
+            default = clock.index if clock.index >= total - 1 else clock.index + 1
         elif clock.phase == "before":
             default = 0
         else:
             raise ApiError(409, "no_slice", "There is no slice waiting for a note.")
         if requested is None:
-            if clock.phase == "during" and clock.index == SLICE_COUNT - 1:
+            if clock.phase == "during" and clock.index == total - 1:
                 return clock.index
             return default
-        if type(requested) is not int or requested < 0 or requested >= SLICE_COUNT:
-            raise ApiError(400, "bad_slice", "slice must be an integer from 0 through 11.")
+        if type(requested) is not int or requested < 0 or requested >= total:
+            raise ApiError(400, "bad_slice", f"slice must be an integer from 0 through {total - 1}.")
         return requested
 
     def _ross_from(self, day: sqlite3.Row | None, now: datetime) -> dict[str, Any]:
@@ -1085,7 +1136,11 @@ class Store:
             pending = clock.holding_index
         elif clock.phase == "during":
             reason = "painting"
-            pending = None if clock.index is None or clock.index >= SLICE_COUNT - 1 else clock.index + 1
+            pending = (
+                None
+                if clock.index is None or clock.index >= self._slice_total(day) - 1
+                else clock.index + 1
+            )
         elif clock.phase == "after":
             reason = "locked"
         elif clock.phase == "before":
@@ -1469,12 +1524,19 @@ class Store:
         order = self._order_for(day)
         to_act = self.can_act(day, agent_id, now)
         turn_left = None if to_act else 0
+        total = self._slice_total(day)
         if phase == "during" and index is not None:
             round_index = round_on_slice(index)
-        elif phase == "before":
+        elif phase in ("before", "awaiting"):
             round_index = 1
+        elif day is not None:
+            clock = self._session_clock(day, now)
+            if clock.holding_index is not None:
+                round_index = round_on_slice(clock.holding_index)
+            else:
+                round_index = rounds_in(total)
         else:
-            round_index = 4
+            round_index = rounds_in(total)
         slice_start, slice_end = self._slice_bounds(day, now, phase, index)
         palette = json.loads(day["palette_json"]) if day and day["palette_json"] else []
         focus = None
@@ -2008,19 +2070,20 @@ class Store:
             }
         order = self._order_for(featured)
         palette = json.loads(featured["palette_json"]) if featured["palette_json"] else []
+        total = self._slice_total(featured)
         is_live = today is not None and featured["id"] == today["id"] and not int(featured["archived"])
         session = self._session_clock(featured, now) if is_live else None
         if not is_live:
             phase, index = "after", None
             live_index = None
-            miss_before = SLICE_COUNT
+            miss_before = total
             holding_index = None
         else:
             phase, index = session.phase, session.index
             holding_index = session.holding_index if phase == "holding" else None
             if phase == "after":
                 live_index = None
-                miss_before = SLICE_COUNT
+                miss_before = total
             elif phase == "holding":
                 live_index = None
                 index = None
@@ -2071,7 +2134,7 @@ class Store:
                 slice_end = int(clock.deadline.timestamp())
         return {
             "status": status,
-            "message": _status_message(status),
+            "message": _status_message(status, total),
             "mural_id": f"day-{featured['day_index']}",
             "day_id": featured["id"],
             "day_index": featured["day_index"],
@@ -2112,7 +2175,7 @@ class Store:
                 palette,
             ),
             "clock": clock,
-            "schedule": _schedule_meta(),
+            "schedule": _schedule_meta(total),
             "archive": archive,
             "viewing_archive": bool(day_id is not None and default_feature is not None and featured["id"] != default_feature["id"]),
         }
@@ -2276,11 +2339,16 @@ class Store:
         stored = bytes(day["canvas"])
         if not slices:
             return stored, palette
+        total = self._slice_total(day)
         for index in slices:
-            if type(index) is not int or index < 0 or index >= SLICE_COUNT:
-                raise ApiError(400, "bad_slices", "Slice indices must be integers from 0 through 11.")
+            if type(index) is not int or index < 0 or index >= total:
+                raise ApiError(
+                    400,
+                    "bad_slices",
+                    f"Slice indices must be integers from 0 through {total - 1}.",
+                )
         wanted = set(slices)
-        if wanted >= set(range(SLICE_COUNT)):
+        if wanted >= set(range(total)):
             return stored, palette
         canvas = blank_canvas()
         rows = self.conn.execute(
@@ -2400,7 +2468,7 @@ class Store:
             floor = 0 if phase == "before" or index is None else index
         order = self._order_for(day)
         remaining = 0
-        for slice_i in range(SLICE_COUNT):
+        for slice_i in range(self._slice_total(day)):
             if artist_on_slice(order, slice_i) != agent_id:
                 continue
             if slice_i < floor:
@@ -2620,35 +2688,44 @@ def _parse_chat(raw: Any) -> str:
     return text
 
 
-def _lock_time(ny_date_text: str) -> datetime:
+def _lock_time(ny_date_text: str, slice_count: int | None = None) -> datetime:
     year, month, day = (int(part) for part in ny_date_text.split("-"))
-    _, lock = day_bounds(datetime(year, month, day).date())
+    _, lock = day_bounds(datetime(year, month, day).date(), slice_count)
     return lock
 
 
-def _schedule_meta() -> dict[str, Any]:
+def _schedule_meta(slice_count: int | None = None) -> dict[str, Any]:
+    """Schedule block for one canvas, or for a new morning when ``slice_count`` is omitted."""
+    total = resolve_slice_count(slice_count)
+    rounds = rounds_in(total)
     return {
         "tz": "America/New_York",
         "opens": "08:00",
-        "locks": "08:36",
+        "locks": lock_label(total),
         "slice_seconds": SLICE_SECONDS,
         "slice_minutes": SLICE_SECONDS // 60,
-        "rounds": 4,
-        "slices": SLICE_COUNT,
+        "rounds": rounds,
+        "slices": total,
         "pixels_per_turn": PIXELS_PER_TURN,
         "pixels_per_artist_day": PIXELS_PER_ARTIST_DAY,
-        "turns_per_artist": 4,
+        "turns_per_artist": rounds,
+        "session_minutes": session_minutes(total),
+        "session_length": session_length_phrase(total),
     }
 
 
-def _status_message(status: str) -> str:
+def _status_message(status: str, slice_count: int | None = None) -> str:
+    length = session_length_phrase(slice_count)
     return {
         "no_day": "No canvas for this date yet. The morning routine opens one at 8:00 ET.",
         "before_open": "The canvas is ready and waiting. Painting starts at 8:00 ET.",
         "awaiting_design": "Waiting for the art director to publish today's theme and 16 colors.",
         "review": "Waiting for the art director before the next slice opens.",
         "painting": "The morning is open. One artist holds the brush for this 3-minute slice.",
-        "locked": "Locked. A morning lasts at most 36 minutes after 08:00 ET, and the next one starts blank.",
+        "locked": (
+            f"Locked. A morning lasts at most {length} after 08:00 ET, "
+            "and the next one starts blank."
+        ),
         "missed": "The morning passed without a design. Tomorrow starts blank.",
         "scheduled": "This canvas is scheduled.",
     }.get(status, status)
