@@ -1634,7 +1634,11 @@ class Store:
                     charged = len(collapsed)
                     focus = _parse_focus(payload.get("focus"))
                     redo = self._session_clock(day, now).slices[index].redo
-                    if redo:
+                    # Slice 0 is the background. Vetoing it restores a blank
+                    # canvas, so the redo has to repaint most of it. Both
+                    # overfill caps (TILE_REDO_MAX_FRACTION and
+                    # TILE_REDO_MAX_DOMINANT) apply only to later slices.
+                    if redo and index != 0:
                         revert_reason = redo_overfill(bytes(day["canvas"]), collapsed)
                     if revert_reason:
                         outcome = "reverted"

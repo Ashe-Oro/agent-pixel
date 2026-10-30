@@ -493,6 +493,45 @@ def test_small_redo_paint_stays(client, monkeypatch):
     assert client.get("/watch/state").json()["status"] == "review"
 
 
+def test_slice_zero_redo_over_fraction_is_accepted(client, monkeypatch):
+    """Vetoing slice 0 blanks the canvas, so the redo may repaint most of it."""
+    monkeypatch.setenv("TILE_NOTE_GATE_SECONDS", "75")
+    opened = open_design(client, "2026-10-28T08:00:00")
+    day_id = opened["day_id"]
+    assert client.post(
+        "/agent/act",
+        headers=auth("claude"),
+        json={"type": "paint", "pixels": [{"x": 4, "y": 4, "color": 2}]},
+    ).status_code == 200
+    assert client.post(
+        "/agent/veto", headers=auth("ross"), json={"slice": 0, "reason": "background"}
+    ).status_code == 200
+    assert cells(client, day_id, 4, 4) == [0]
+    # 40000 / 65536 is about 61%: over the 35% cap, and one color, so it
+    # would also trip the dominant-color cap on a later slice.
+    count = 40000
+    kept = client.post(
+        "/agent/act",
+        headers=auth("claude"),
+        json={"type": "paint", "pixels": _block(count, 8)},
+    )
+    assert kept.status_code == 200, kept.text
+    assert cells(client, day_id, 0, 0) == [8]
+    last = count - 1
+    assert cells(client, day_id, last % 256, last // 256) == [8]
+    assert cells(client, day_id, count % 256, count // 256) == [0]
+    state = client.get("/watch/state").json()
+    assert state["status"] == "review"
+    chip = state["slices"][0]
+    assert chip["state"] == "done"
+    assert [item["state"] for item in chip["history"]] == ["vetoed", "done"]
+    assert client.get("/agent/turn", headers=auth("claude")).json()["to_act"] is False
+    ledger = client.get(f"/host/days/{day_id}/ledger", headers=host()).json()
+    assert [stroke["state"] for stroke in ledger["strokes"]] == ["vetoed", "active"]
+    assert ledger["strokes"][1]["pixel_count"] == count
+    assert ledger["strokes"][1]["revert_reason"] is None
+
+
 def test_damaging_redo_reverts_and_opens_the_gate(client, monkeypatch):
     monkeypatch.setenv("TILE_NOTE_GATE_SECONDS", "75")
     opened = open_design(client, "2026-10-28T08:00:00")
@@ -502,34 +541,45 @@ def test_damaging_redo_reverts_and_opens_the_gate(client, monkeypatch):
         headers=auth("claude"),
         json={"type": "paint", "pixels": [{"x": 4, "y": 4, "color": 2}]},
     ).status_code == 200
-    assert client.post("/agent/veto", headers=auth("ross"), json={"slice": 0, "reason": "again"}).status_code == 200
+    assert client.post(
+        "/agent/note", headers=auth("ross"), json={"note": "go", "slice": 1}
+    ).status_code == 200
+    assert client.post(
+        "/agent/act",
+        headers=auth("grok-artist"),
+        json={"type": "paint", "pixels": [{"x": 6, "y": 6, "color": 3}]},
+    ).status_code == 200
+    assert client.post(
+        "/agent/veto", headers=auth("ross"), json={"slice": 1, "reason": "again"}
+    ).status_code == 200
     before = client.get("/watch/canvas.png", params={"day_id": day_id, "scale": 1})
-    preview = client.get("/agent/turn", headers=auth("claude")).json()["preview_url"]
+    preview = client.get("/agent/turn", headers=auth("grok-artist")).json()["preview_url"]
     flood = client.post(
         "/agent/act",
-        headers=auth("claude"),
+        headers=auth("grok-artist"),
         json={"type": "paint", "pixels": _block(40000, 8)},
     )
     assert flood.status_code == 422, flood.text
     assert flood.json()["error"] == "overfill_reverted"
     assert "reverted" in flood.json()["message"]
-    assert cells(client, day_id, 4, 4) == [0]
+    assert cells(client, day_id, 4, 4) == [2]
+    assert cells(client, day_id, 6, 6) == [0]
     after = client.get("/watch/canvas.png", params={"day_id": day_id, "scale": 1})
     assert after.content == before.content
     assert after.headers["etag"] == before.headers["etag"]
-    blank_layer = client.get("/watch/canvas.png", params={"day_id": day_id, "scale": 1, "slices": "0"})
-    assert list(Image.open(BytesIO(blank_layer.content)).get_flattened_data()) == list(
-        Image.open(BytesIO(before.content)).get_flattened_data()
-    )
+    blank_layer = client.get("/watch/canvas.png", params={"day_id": day_id, "scale": 1, "slices": "1"})
+    layer = Image.open(BytesIO(blank_layer.content)).convert("RGB")
+    background = Image.new("RGB", layer.size, layer.getpixel((0, 0)))
+    assert list(layer.get_flattened_data()) == list(background.get_flattened_data())
     state = client.get("/watch/state").json()
     assert state["status"] == "review"
-    chip = state["slices"][0]
+    chip = state["slices"][1]
     assert chip["state"] == "reverted"
     assert [item["state"] for item in chip["history"]] == ["vetoed", "reverted"]
     assert chip["history"][1]["removed"] is True
     assert "Reverted" in client.get("/watch").text
     assert "again" not in client.get("/watch/state").text
-    later = client.get("/agent/turn", headers=auth("claude")).json()
+    later = client.get("/agent/turn", headers=auth("grok-artist")).json()
     assert later["to_act"] is False
     assert "&v=" in later["preview_url"]
     assert later["preview_url"] != preview
@@ -538,17 +588,17 @@ def test_damaging_redo_reverts_and_opens_the_gate(client, monkeypatch):
     ).content
     again = client.post(
         "/agent/act",
-        headers=auth("claude"),
+        headers=auth("grok-artist"),
         json={"type": "paint", "pixels": [{"x": 1, "y": 1, "color": 1}]},
     )
     assert again.status_code == 409
-    noted = client.post("/agent/note", headers=auth("ross"), json={"note": "next", "slice": 1})
+    noted = client.post("/agent/note", headers=auth("ross"), json={"note": "next", "slice": 2})
     assert noted.status_code == 200, noted.text
     assert noted.json()["released"] is True
-    grok = client.get("/agent/turn", headers=auth("grok-artist")).json()
-    assert grok["to_act"] is True
-    assert grok["slice_index"] == 1
-    assert grok["redo"] is False
+    nxt = client.get("/agent/turn", headers=auth("openai")).json()
+    assert nxt["to_act"] is True
+    assert nxt["slice_index"] == 2
+    assert nxt["redo"] is False
     ledger = client.get(f"/host/days/{day_id}/ledger", headers=host()).json()
     reverted = [stroke for stroke in ledger["strokes"] if stroke["state"] == "reverted"]
     assert len(reverted) == 1
@@ -561,10 +611,16 @@ def test_one_color_redo_just_under_five_percent_stays(client, monkeypatch):
     opened = open_design(client, "2026-10-28T08:00:00")
     day_id = opened["day_id"]
     assert client.post("/agent/act", headers=auth("claude"), json={"type": "pass"}).status_code == 200
-    assert client.post("/agent/veto", headers=auth("ross"), json={"slice": 0, "reason": "fill"}).status_code == 200
+    assert client.post(
+        "/agent/note", headers=auth("ross"), json={"note": "go", "slice": 1}
+    ).status_code == 200
+    assert client.post("/agent/act", headers=auth("grok-artist"), json={"type": "pass"}).status_code == 200
+    assert client.post(
+        "/agent/veto", headers=auth("ross"), json={"slice": 1, "reason": "fill"}
+    ).status_code == 200
     kept = client.post(
         "/agent/act",
-        headers=auth("claude"),
+        headers=auth("grok-artist"),
         json={"type": "paint", "pixels": _block(3276, 6)},
     )
     assert kept.status_code == 200, kept.text
@@ -576,14 +632,18 @@ def test_one_color_redo_over_five_percent_reverts(client, monkeypatch):
     opened = open_design(client, "2026-10-28T08:00:00")
     day_id = opened["day_id"]
     assert client.post("/agent/act", headers=auth("claude"), json={"type": "pass"}).status_code == 200
-    assert client.post("/agent/veto", headers=auth("ross"), json={"slice": 0}).status_code == 200
+    assert client.post(
+        "/agent/note", headers=auth("ross"), json={"note": "go", "slice": 1}
+    ).status_code == 200
+    assert client.post("/agent/act", headers=auth("grok-artist"), json={"type": "pass"}).status_code == 200
+    assert client.post("/agent/veto", headers=auth("ross"), json={"slice": 1}).status_code == 200
     flooded = client.post(
         "/agent/act",
-        headers=auth("claude"),
+        headers=auth("grok-artist"),
         json={"type": "paint", "pixels": _block(3277, 6)},
     )
     assert flooded.status_code == 422
     assert flooded.json()["error"] == "overfill_reverted"
     assert cells(client, day_id, 0, 0) == [0]
-    assert client.get("/watch/state").json()["slices"][0]["state"] == "reverted"
-    assert client.get("/agent/turn", headers=auth("claude")).json()["to_act"] is False
+    assert client.get("/watch/state").json()["slices"][1]["state"] == "reverted"
+    assert client.get("/agent/turn", headers=auth("grok-artist")).json()["to_act"] is False
