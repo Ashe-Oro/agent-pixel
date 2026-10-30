@@ -42,13 +42,17 @@ from app.schedule import (
     GRID,
     PIXELS_PER_ARTIST_DAY,
     PIXELS_PER_TURN,
+    SESSION_SECONDS,
     SLICE_COUNT,
     SLICE_SECONDS,
     NY,
+    SessionClock,
     artist_on_slice,
     day_bounds,
+    design_wait_seconds,
     label_clock,
     label_hhmm,
+    note_gate_seconds,
     ny_date,
     parse_ny_local,
     position,
@@ -85,6 +89,31 @@ _DAYS_COLUMNS = """
 # Latest-stroke cells stay in TurnView only while the list is small.
 # A full-canvas paint is the preview PNG, not 65,536 coordinates in the prompt.
 TURN_VIEW_INLINE_PIXELS = 512
+BRIEF_MAX = 4000
+DIRECTOR_NOTE_MAX = 2000
+DIRECTOR_ID = "ross"
+FALLBACK_THEME = "Open canvas"
+FALLBACK_BRIEF = (
+    "Paint freely. The art director did not publish a brief before the design wait ended."
+)
+FALLBACK_PALETTE = [
+    {"id": 0, "hex": "#161616", "name": "ground"},
+    {"id": 1, "hex": "#f4f4f4", "name": "paper"},
+    {"id": 2, "hex": "#e23d3d", "name": "red"},
+    {"id": 3, "hex": "#e8832f", "name": "orange"},
+    {"id": 4, "hex": "#f0d040", "name": "yellow"},
+    {"id": 5, "hex": "#3aaa4a", "name": "green"},
+    {"id": 6, "hex": "#2f8f8a", "name": "teal"},
+    {"id": 7, "hex": "#3a6fdb", "name": "blue"},
+    {"id": 8, "hex": "#7a4fd4", "name": "violet"},
+    {"id": 9, "hex": "#d23d8a", "name": "pink"},
+    {"id": 10, "hex": "#8a5a3a", "name": "brown"},
+    {"id": 11, "hex": "#c4a06a", "name": "tan"},
+    {"id": 12, "hex": "#6e6e6e", "name": "gray"},
+    {"id": 13, "hex": "#b8d4f0", "name": "sky"},
+    {"id": 14, "hex": "#1c3a28", "name": "pine"},
+    {"id": 15, "hex": "#101820", "name": "ink"},
+]
 CHAT_MAX_CHARS = 240
 CHAT_COOLDOWN_SECONDS = 15
 CHAT_PER_AGENT_DAY = 30
@@ -93,6 +122,7 @@ CHAT_LIST_LIMIT = 80
 from app.seed import COZY_BRIEF, COZY_PALETTE, COZY_THEME, blank_canvas, draw_cabin
 
 KNOWN_AGENTS = ("design",) + ARTISTS
+SEAT_IDS = KNOWN_AGENTS + (DIRECTOR_ID,)
 logger = logging.getLogger(__name__)
 
 
@@ -331,6 +361,13 @@ class Store:
               created_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS chat_day_agent ON chat (day_id, agent_id, id);
+            CREATE TABLE IF NOT EXISTS director_notes (
+              day_id INTEGER NOT NULL,
+              slice_index INTEGER NOT NULL,
+              body TEXT NOT NULL,
+              created_at INTEGER NOT NULL,
+              PRIMARY KEY (day_id, slice_index)
+            );
             """
         )
         self.conn.executescript(WAKE_DDL)
@@ -537,7 +574,16 @@ class Store:
             day = self.today_row()
             if day is not None and mode in ("next_slice", "lock"):
                 clock = self._session_clock(day, current)
-                if mode == "lock" or clock.phase == "after" or clock.deadline is None:
+                if mode == "lock" or clock.phase == "after":
+                    self._write_clock(clock.lock_at)
+                    return
+                if clock.phase == "holding" and clock.hold_until is not None:
+                    self._write_clock(clock.hold_until)
+                    return
+                if clock.phase == "awaiting" and clock.hold_until is not None:
+                    self._write_clock(clock.hold_until)
+                    return
+                if clock.deadline is None:
                     self._write_clock(clock.lock_at)
                     return
                 if clock.phase == "before":
@@ -593,7 +639,61 @@ class Store:
             for row in rows
         }
 
+    def _design_deadline(self, day: sqlite3.Row) -> datetime:
+        created = datetime.fromtimestamp(int(day["created_at"]), timezone.utc)
+        return created + timedelta(seconds=design_wait_seconds())
+
+    def _awaiting_clock(self, deadline: datetime):
+        """Slices have not started. The board shows the plan from the design deadline."""
+        projected = walk_session(deadline, {}, deadline - timedelta(seconds=1))
+        return SessionClock(
+            phase="awaiting",
+            index=None,
+            deadline=deadline,
+            lock_at=projected.lock_at,
+            slices=projected.slices,
+            hold_until=deadline,
+            holding_index=0,
+        )
+
+    def _director_note_times(self, day_id: int) -> dict[int, datetime]:
+        rows = self.conn.execute(
+            "SELECT slice_index, created_at FROM director_notes WHERE day_id = ?",
+            (day_id,),
+        ).fetchall()
+        return {
+            int(row["slice_index"]): datetime.fromtimestamp(int(row["created_at"]), timezone.utc)
+            for row in rows
+        }
+
+    def _visible_note(self, day_id: int, slice_index: int | None) -> str | None:
+        """Latest Ross note aimed at this slice or an earlier one."""
+        if slice_index is None:
+            row = self.conn.execute(
+                """
+                SELECT body FROM director_notes
+                WHERE day_id = ?
+                ORDER BY created_at DESC, slice_index DESC LIMIT 1
+                """,
+                (day_id,),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                """
+                SELECT body FROM director_notes
+                WHERE day_id = ? AND slice_index <= ?
+                ORDER BY created_at DESC, slice_index DESC LIMIT 1
+                """,
+                (day_id, slice_index),
+            ).fetchone()
+        return row["body"] if row else None
+
     def _session_clock(self, day: sqlite3.Row, now: datetime):
+        if not day["theme"]:
+            deadline = self._design_deadline(day)
+            if now < deadline:
+                return self._awaiting_clock(deadline)
+            return walk_session(self._opens_at(day), {}, now)
         acted = self._acted_at(day["id"])
         order = json.loads(day["artist_order_json"]) if day["artist_order_json"] else self._order_for(day)
         rows = self.conn.execute(
@@ -605,7 +705,84 @@ class Store:
             for index in range(int(row["slice_index"]) + 1, SLICE_COUNT):
                 if artist_on_slice(order, index) == row["agent_id"] and index not in acted:
                     acted[index] = closed
-        return walk_session(self._opens_at(day), acted, now)
+        return walk_session(
+            self._opens_at(day),
+            acted,
+            now,
+            gate_seconds=note_gate_seconds(),
+            note_at=self._director_note_times(day["id"]),
+        )
+
+    def _ensure_design_timeout(self) -> None:
+        def mutate() -> None:
+            self._apply_design_timeout(self.now())
+
+        self._run_write(mutate)
+
+    def _timeout_blank(self, now: datetime) -> sqlite3.Row | None:
+        """Newest open canvas that still has no theme and has passed its design wait.
+
+        A blank whose wait ended more than a full session ago is left alone so a
+        stray legacy row cannot be revived. The per-minute cron notices the
+        deadline while that window is still open.
+        """
+        row = self.conn.execute(
+            "SELECT * FROM days WHERE archived = 0 ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if row is None or row["theme"]:
+            return None
+        deadline = self._design_deadline(row)
+        if now < deadline:
+            return None
+        if now >= deadline + timedelta(seconds=SESSION_SECONDS):
+            return None
+        return row
+
+    def _apply_design_timeout(self, now: datetime) -> bool:
+        row = self._timeout_blank(now)
+        if row is None:
+            return False
+        self._store_design(row, now, FALLBACK_THEME, FALLBACK_BRIEF, FALLBACK_PALETTE)
+        return True
+
+    def _store_design(
+        self,
+        day: sqlite3.Row,
+        now: datetime,
+        theme: str,
+        brief: str,
+        palette: list[dict[str, Any]],
+    ) -> list[str]:
+        """Write the theme and start slice 0 at ``now``. Caller holds the write."""
+        settings = self._settings()
+        order = rotate(
+            json.loads(settings["roster_json"]),
+            day["day_index"],
+            bool(settings["rotate"]),
+        )
+        stamp = int(now.timestamp())
+        cur = self.conn.execute(
+            """
+            UPDATE days
+            SET theme = ?, brief = ?, palette_json = ?, canvas = ?,
+                artist_order_json = ?, designed_at = ?, opens_at = ?
+            WHERE id = ? AND (theme IS NULL OR theme = '')
+            """,
+            (
+                theme,
+                brief,
+                json.dumps(palette),
+                bytes(blank_canvas()),
+                json.dumps(order),
+                stamp,
+                stamp,
+                day["id"],
+            ),
+        )
+        if cur.rowcount != 1:
+            raise ApiError(409, "already_designed", "Today already has a theme and palette.")
+        self.dirty = True
+        return order
 
     def _phase_for(self, day: sqlite3.Row | None, now: datetime) -> tuple[str, int | None]:
         if day is None:
@@ -749,7 +926,193 @@ class Store:
             return int(day["id"])
 
         day_id = self._run_write(mutate)
+        self._dispatch_quietly()
         return self._tick_payload(self.day_by_id(day_id), self.now())
+
+    def open_for_director(self, agent_id: str, payload: dict[str, Any] | None) -> dict[str, Any]:
+        """Ross opens a one-off canvas. An optional design starts slice 0 immediately."""
+        if agent_id != DIRECTOR_ID:
+            raise ApiError(403, "wrong_role", "Only the art director can open a canvas.")
+        body = payload or {}
+        if not isinstance(body, dict):
+            raise ApiError(400, "bad_canvas", "Canvas body must be an object.")
+        design = None
+        if any(key in body for key in ("theme", "brief", "palette", "type")):
+            if body.get("type") not in (None, "design"):
+                raise ApiError(400, "bad_action", "Design payload type must be 'design'.")
+            design = _parse_design(body)
+        saved: dict[str, Any] = {}
+
+        def mutate() -> int:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                now = self.now().astimezone(timezone.utc).replace(microsecond=0)
+                current = self.today_row()
+                if current is not None:
+                    self._archive_day(current["id"], now)
+                day = self._insert_day(now, KIND_BONUS, now)
+                if design is not None:
+                    theme, brief, palette = design
+                    order = self._store_design(day, now, theme, brief, palette)
+                    saved["theme"] = theme
+                    saved["brief"] = brief
+                    saved["order"] = order
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+            return int(day["id"])
+
+        day_id = self._run_write(mutate)
+        self._dispatch_quietly()
+        payload_out = self._tick_payload(self.day_by_id(day_id), self.now())
+        if design is not None:
+            payload_out["theme"] = saved["theme"]
+            payload_out["brief"] = saved["brief"]
+            payload_out["first_agent_id"] = saved["order"][0]
+        return payload_out
+
+    def post_director_note(self, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if agent_id != DIRECTOR_ID:
+            raise ApiError(403, "wrong_role", "Only the art director can post a slice note.")
+        if not isinstance(payload, dict):
+            raise ApiError(400, "bad_note", "Note body must be an object.")
+        text = _parse_director_note(payload.get("note", payload.get("text")))
+        requested = payload.get("slice", payload.get("for_slice"))
+        saved: dict[str, Any] = {}
+
+        def mutate() -> None:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                now = self.now()
+                day = self.today_row()
+                if day is None:
+                    raise ApiError(409, "no_day", "No canvas is open.")
+                if not day["theme"]:
+                    raise ApiError(409, "awaiting_design", "Post the design before a slice note.")
+                target = self._note_target(day, now, requested)
+                stamp = int(now.timestamp())
+                self.conn.execute(
+                    """
+                    INSERT INTO director_notes (day_id, slice_index, body, created_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(day_id, slice_index) DO UPDATE SET body = excluded.body
+                    """,
+                    (day["id"], target, text, stamp),
+                )
+                self.conn.commit()
+                self.dirty = True
+                saved["day_id"] = int(day["id"])
+                saved["slice"] = target
+            except Exception:
+                self.conn.rollback()
+                raise
+
+        self._run_write(mutate)
+        self._dispatch_quietly()
+        fresh = self.day_by_id(saved["day_id"])
+        clock = self._session_clock(fresh, self.now())
+        released = clock.phase == "during" and clock.index == saved["slice"]
+        return {
+            "ok": True,
+            "day_id": saved["day_id"],
+            "slice": saved["slice"],
+            "director_note": text,
+            "released": released,
+        }
+
+    def ross_view(self) -> dict[str, Any]:
+        self._ensure_design_timeout()
+        with self.lock:
+            self._refresh()
+            now = self.now()
+            day = self.today_row()
+            if day is None:
+                designed = self._designed_rows()
+                day = designed[0] if designed else None
+            view = self._ross_from(day, now)
+        self._dispatch_quietly()
+        return view
+
+    def _note_target(self, day: sqlite3.Row, now: datetime, requested: Any) -> int:
+        clock = self._session_clock(day, now)
+        if clock.phase == "after" or int(day["archived"]):
+            raise ApiError(409, "morning_locked", "This session is locked.")
+        if clock.phase == "holding" and clock.holding_index is not None:
+            default = clock.holding_index
+        elif clock.phase == "during" and clock.index is not None:
+            default = clock.index if clock.index >= SLICE_COUNT - 1 else clock.index + 1
+        elif clock.phase == "before":
+            default = 0
+        else:
+            raise ApiError(409, "no_slice", "There is no slice waiting for a note.")
+        if requested is None:
+            if clock.phase == "during" and clock.index == SLICE_COUNT - 1:
+                return clock.index
+            return default
+        if type(requested) is not int or requested < 0 or requested >= SLICE_COUNT:
+            raise ApiError(400, "bad_slice", "slice must be an integer from 0 through 11.")
+        return requested
+
+    def _ross_from(self, day: sqlite3.Row | None, now: datetime) -> dict[str, Any]:
+        if day is None:
+            return {
+                "role": DIRECTOR_ID,
+                "to_act": False,
+                "reason": "no_day",
+                "status": "no_day",
+                "day_id": None,
+                "theme": None,
+                "brief": None,
+                "director_note": None,
+                "palette": [],
+                "slice_index": None,
+                "pending_slice": None,
+                "hold_until_unix": None,
+            }
+        clock = self._session_clock(day, now)
+        designed = bool(day["theme"])
+        pending = None
+        reason = "idle"
+        to_act = False
+        if not designed and clock.phase != "after":
+            to_act = True
+            reason = "design_needed"
+            pending = 0
+        elif clock.phase == "holding" and clock.holding_index is not None:
+            to_act = True
+            reason = "note_needed"
+            pending = clock.holding_index
+        elif clock.phase == "during":
+            reason = "painting"
+            pending = None if clock.index is None or clock.index >= SLICE_COUNT - 1 else clock.index + 1
+        elif clock.phase == "after":
+            reason = "locked"
+        elif clock.phase == "before":
+            reason = "before_routine"
+        note_slice = clock.index if clock.index is not None else pending
+        preview = None
+        if day["canvas"] is not None:
+            preview = f"/watch/canvas.png?day_id={day['id']}&scale=2"
+        return {
+            "role": DIRECTOR_ID,
+            "to_act": to_act,
+            "reason": reason,
+            "status": self._status(day, now),
+            "day_id": day["id"],
+            "day_index": day["day_index"],
+            "mural_id": f"day-{day['day_index']}",
+            "ny_date": day["ny_date"],
+            "theme": day["theme"],
+            "brief": day["brief"] if designed else None,
+            "director_note": self._visible_note(day["id"], note_slice) if designed else None,
+            "palette": json.loads(day["palette_json"]) if day["palette_json"] else [],
+            "slice_index": clock.index,
+            "pending_slice": pending,
+            "hold_until_unix": int(clock.hold_until.timestamp()) if clock.hold_until else None,
+            "preview_url": preview,
+            "render_url": preview,
+        }
 
     def day_by_id(self, day_id: int) -> sqlite3.Row:
         row = self.conn.execute("SELECT * FROM days WHERE id = ?", (day_id,)).fetchone()
@@ -788,15 +1151,18 @@ class Store:
     # --- design / act ------------------------------------------------------
 
     def design_view(self, agent_id: str) -> dict[str, Any]:
+        if agent_id == DIRECTOR_ID:
+            return self.ross_view()
         if agent_id != "design":
-            raise ApiError(403, "wrong_role", "Only the design agent can read the design brief.")
+            raise ApiError(403, "wrong_role", "Only the art director or the design seat can read the design brief.")
+        self._ensure_design_timeout()
         with self.lock:
             self._refresh()
             now = self.now()
             day = self.today_row()
             phase, _ = self._phase_for(day, now)
             designed = bool(day and day["theme"])
-            to_act = phase == "during" and not designed
+            to_act = phase in ("during", "awaiting") and not designed
             reason = "ready"
             if phase == "before":
                 reason = "before_routine"
@@ -812,11 +1178,13 @@ class Store:
                 "day_index": day["day_index"] if day else None,
                 "mural_id": f"day-{day['day_index']}" if day else None,
                 "status": self._status(day, now),
+                "theme": day["theme"] if day else None,
+                "brief": day["brief"] if day and designed else None,
             }
 
     def submit_design(self, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        if agent_id != "design":
-            raise ApiError(403, "wrong_role", "Only the design agent can publish a theme.")
+        if agent_id not in ("design", DIRECTOR_ID):
+            raise ApiError(403, "wrong_role", "Only the art director or the design seat can publish a theme.")
         if payload.get("type") != "design":
             raise ApiError(400, "bad_action", "Design payload type must be 'design'.")
         theme, brief, palette = _parse_design(payload)
@@ -835,43 +1203,20 @@ class Store:
                     if phase == "before":
                         raise ApiError(409, "before_routine", "Design opens at 08:00 America/New_York.")
                     raise ApiError(409, "morning_locked", "This session is locked.")
-                phase, index = self._phase_for(day, now)
+                phase, _index = self._phase_for(day, now)
                 if phase == "before":
                     raise ApiError(409, "before_routine", "Design opens at 08:00 America/New_York.")
                 if phase == "after":
                     raise ApiError(409, "morning_locked", "This session is locked.")
                 if day["theme"]:
                     raise ApiError(409, "already_designed", "Today already has a theme and palette.")
-                settings = self._settings()
-                order = rotate(
-                    json.loads(settings["roster_json"]),
-                    day["day_index"],
-                    bool(settings["rotate"]),
-                )
-                canvas = bytes(blank_canvas())
-                self.conn.execute(
-                    """
-                    UPDATE days
-                    SET theme = ?, brief = ?, palette_json = ?, canvas = ?,
-                        artist_order_json = ?, designed_at = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        theme,
-                        brief,
-                        json.dumps(palette),
-                        canvas,
-                        json.dumps(order),
-                        int(now.timestamp()),
-                        day["id"],
-                    ),
-                )
+                order = self._store_design(day, now, theme, brief, palette)
                 self.conn.commit()
-                self.dirty = True
                 saved["day_id"] = day["id"]
                 saved["day_index"] = day["day_index"]
                 saved["order"] = order
-                saved["index"] = index
+                # Slice 0 opens at this clock. The design wait does not burn slices.
+                saved["index"] = 0
             except Exception:
                 self.conn.rollback()
                 raise
@@ -898,6 +1243,7 @@ class Store:
     def act(self, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         if agent_id not in ARTISTS:
             raise ApiError(403, "wrong_role", "Only an artist can paint or pass.")
+        self._ensure_design_timeout()
         action = payload.get("type")
         if action not in ("paint", "pass"):
             raise ApiError(400, "bad_action", "Action type must be paint or pass.")
@@ -1032,6 +1378,24 @@ class Store:
             if day["kind"] == KIND_BONUS:
                 raise ApiError(409, "before_routine", "This session has not opened yet.")
             raise ApiError(409, "before_routine", "Artists paint from 08:00 ET.")
+        if phase == "holding":
+            closed = clock.holding_index - 1 if clock.holding_index else -1
+            if closed >= 0 and day["artist_order_json"]:
+                closed_artist = artist_on_slice(json.loads(day["artist_order_json"]), closed)
+                if closed_artist == agent_id:
+                    if self._action_for_slice(day["id"], closed):
+                        raise ApiError(409, "slice_used", "This 3-minute slice already has an action.")
+                    if clock.slices[closed].missed:
+                        raise ApiError(
+                            409,
+                            "slice_missed",
+                            "That 3-minute slice closed with no paint or pass. The turn has moved on.",
+                        )
+            raise ApiError(
+                409,
+                "review_wait",
+                "The next slice opens when the art director posts a note, or when that wait ends.",
+            )
         if phase == "after" or index is None:
             raise ApiError(409, "morning_locked", "This session is locked.")
         order = json.loads(day["artist_order_json"])
@@ -1060,8 +1424,11 @@ class Store:
             raise ApiError(409, "slice_used", "This 3-minute slice already has an action.")
 
     def turn_view(self, agent_id: str) -> dict[str, Any]:
+        if agent_id == DIRECTOR_ID:
+            return self.ross_view()
         if agent_id not in ARTISTS:
             raise ApiError(403, "wrong_role", "TurnView is for an artist seat.")
+        self._ensure_design_timeout()
         with self.lock:
             self._refresh()
             now = self.now()
@@ -1123,6 +1490,12 @@ class Store:
                     f"&x={focus['x']}&y={focus['y']}&w={focus['w']}&h={focus['h']}&scale=4"
                 )
         strokes = self._recent_strokes(day["id"], include_latest_pixels=True) if day else []
+        note_slice = index
+        if day is not None and note_slice is None:
+            clock = self._session_clock(day, now)
+            if clock.phase == "holding" and clock.holding_index is not None:
+                note_slice = clock.holding_index
+        director_note = self._visible_note(day["id"], note_slice) if day else None
         return {
             "mural_id": f"day-{day['day_index']}" if day else None,
             "day_id": day["id"] if day else None,
@@ -1131,6 +1504,7 @@ class Store:
             "status": self._status(day, now),
             "theme": day["theme"] if day else None,
             "brief": day["brief"] if day else None,
+            "director_note": director_note,
             "palette": palette,
             "grid_w": GRID,
             "grid_h": GRID,
@@ -1156,7 +1530,9 @@ class Store:
         """Start this morning's canvas if it is due, then report the same canvas the watch page shows."""
 
         def mutate() -> None:
-            self._start_scheduled_morning(self.now())
+            now = self.now()
+            self._start_scheduled_morning(now)
+            self._apply_design_timeout(now)
 
         self._run_write(mutate)
         with self.lock:
@@ -1242,6 +1618,9 @@ class Store:
         if day is None or int(day["archived"]):
             return []
         clock = self._session_clock(day, now)
+        note = None
+        if day["theme"] and clock.phase == "during" and clock.index is not None:
+            note = self._visible_note(int(day["id"]), clock.index)
         return plan_wakes(
             day_id=int(day["id"]),
             theme=bool(day["theme"]),
@@ -1254,6 +1633,10 @@ class Store:
             now=now,
             lock_at=clock.lock_at,
             api_base_url=public_base_url(),
+            brief=day["brief"] if day["theme"] else None,
+            director_note=note,
+            design_deadline=None if day["theme"] else self._design_deadline(day),
+            holding_index=clock.holding_index,
         )
 
     def _post_and_finish(self, intent: WakeIntent) -> dict[str, Any]:
@@ -1457,8 +1840,10 @@ class Store:
             return {"day_id": day_id, "wakes": list_wake_rows(self.conn, day_id)}
 
     def _tick_payload(self, day: sqlite3.Row, now: datetime) -> dict[str, Any]:
-        phase, index = self._phase_for(day, now)
+        clock = self._session_clock(day, now)
+        phase, index = clock.phase, clock.index
         designed = bool(day["theme"])
+        waiting_until = None
         if phase == "after":
             public_phase = "locked"
             current = None
@@ -1469,16 +1854,32 @@ class Store:
                 )
             else:
                 hint = "Canvas is locked until tomorrow's 08:00 ET routine."
-        elif not designed:
+        elif not designed or phase == "awaiting":
             public_phase = "awaiting_design"
             current = None
+            index = None
+            if clock.hold_until is not None:
+                waiting_until = int(clock.hold_until.timestamp())
             if day["kind"] == KIND_BONUS:
                 hint = (
-                    'POST /agent/design as the design agent. '
-                    'Step slices with POST /host/clock {"mode":"next_slice"}.'
+                    "Waiting for the art director to post the theme and palette. "
+                    "The first slice starts when that design lands."
                 )
             else:
-                hint = "POST /agent/design as the design agent, then artists paint on their slices."
+                hint = (
+                    "Waiting for the art director to post the theme and palette. "
+                    "The first slice stays closed until then."
+                )
+        elif phase == "holding":
+            public_phase = "review"
+            current = None
+            index = None
+            if clock.hold_until is not None:
+                waiting_until = int(clock.hold_until.timestamp())
+            hint = (
+                "Waiting for the art director's note before the next slice. "
+                "It opens when that note is posted, or when the review wait ends."
+            )
         else:
             public_phase = "slice"
             order = json.loads(day["artist_order_json"])
@@ -1499,6 +1900,7 @@ class Store:
             "round_index": round_on_slice(index) if index is not None else None,
             "current_agent_id": current,
             "hint": hint,
+            "waiting_until_unix": waiting_until,
             "day": {
                 "day_id": day["id"],
                 "day_index": day["day_index"],
@@ -1514,6 +1916,7 @@ class Store:
     # --- reads -------------------------------------------------------------
 
     def watch_state(self, day_id: int | None = None) -> dict[str, Any]:
+        self._ensure_design_timeout()
         with self.lock:
             self._refresh()
             state = self._watch_state(day_id)
@@ -1543,6 +1946,7 @@ class Store:
             self.conn.execute("DELETE FROM chat WHERE day_id = ?", (day_id,))
             self.conn.execute("DELETE FROM artist_state WHERE day_id = ?", (day_id,))
             self.conn.execute("DELETE FROM wakes WHERE day_id = ?", (day_id,))
+            self.conn.execute("DELETE FROM director_notes WHERE day_id = ?", (day_id,))
             self.conn.execute("DELETE FROM days WHERE id = ?", (day_id,))
             self.dirty = True
             return {"ok": True, "day_id": day_id}
@@ -1605,16 +2009,23 @@ class Store:
         order = self._order_for(featured)
         palette = json.loads(featured["palette_json"]) if featured["palette_json"] else []
         is_live = today is not None and featured["id"] == today["id"] and not int(featured["archived"])
+        session = self._session_clock(featured, now) if is_live else None
         if not is_live:
             phase, index = "after", None
             live_index = None
             miss_before = SLICE_COUNT
+            holding_index = None
         else:
-            phase, index = self._phase_for(featured, now)
+            phase, index = session.phase, session.index
+            holding_index = session.holding_index if phase == "holding" else None
             if phase == "after":
                 live_index = None
                 miss_before = SLICE_COUNT
-            elif phase == "before" or index is None:
+            elif phase == "holding":
+                live_index = None
+                index = None
+                miss_before = session.holding_index
+            elif phase in ("before", "awaiting") or index is None:
                 live_index = None
                 miss_before = None
             elif not featured["theme"]:
@@ -1623,7 +2034,7 @@ class Store:
             else:
                 live_index = index
                 miss_before = index
-        slices = self._slice_board(featured, order, live_index, miss_before, now)
+        slices = self._slice_board(featured, order, live_index, miss_before, now, holding_index)
         current = None
         if is_live and phase == "during" and featured["theme"] and index is not None:
             current = artist_on_slice(order, index)
@@ -1666,7 +2077,6 @@ class Store:
             "day_index": featured["day_index"],
             "ny_date": featured["ny_date"],
             "theme": featured["theme"],
-            "brief": featured["brief"],
             "palette": palette,
             "grid_w": GRID,
             "grid_h": GRID,
@@ -1686,6 +2096,11 @@ class Store:
             "round_index": round_on_slice(live_index) if live_index is not None else None,
             "slice_index": live_index,
             "slice_ends_at_unix": slice_end,
+            "waiting_until_unix": (
+                int(session.hold_until.timestamp())
+                if session is not None and session.hold_until is not None and phase in ("awaiting", "holding")
+                else None
+            ),
             "turns_remaining": active["turns_remaining"] if active else None,
             "pixels_remaining_turn": None if active else 0,
             "artists": artists,
@@ -1914,6 +2329,8 @@ class Store:
             if phase == "before":
                 return "before_open"
             return "awaiting_design"
+        if phase == "holding":
+            return "review"
         if phase == "before":
             return "before_open"
         if phase == "after":
@@ -1969,7 +2386,18 @@ class Store:
             phase, index = self._phase_for(day, now)
         if phase == "after":
             return 0
-        floor = 0 if phase == "before" or index is None else index
+        if day is not None:
+            clock = self._session_clock(day, now)
+            if clock.phase == "after":
+                return 0
+            if clock.phase == "holding" and clock.holding_index is not None:
+                floor = clock.holding_index
+            elif clock.phase in ("before", "awaiting") or clock.index is None:
+                floor = 0
+            else:
+                floor = clock.index
+        else:
+            floor = 0 if phase == "before" or index is None else index
         order = self._order_for(day)
         remaining = 0
         for slice_i in range(SLICE_COUNT):
@@ -2027,6 +2455,7 @@ class Store:
         live_index: int | None,
         miss_before: int | None,
         now: datetime,
+        holding_index: int | None = None,
     ) -> list[dict[str, Any]]:
         clock = self._session_clock(day, now)
         actions = {
@@ -2055,6 +2484,8 @@ class Store:
                 state = "missed"
             elif live_index is not None and index < live_index:
                 state = "missed"
+            elif holding_index is not None and index == holding_index:
+                state = "review"
             elif live_index == index:
                 state = "active"
             else:
@@ -2214,12 +2645,22 @@ def _status_message(status: str) -> str:
     return {
         "no_day": "No canvas for this date yet. The morning routine opens one at 8:00 ET.",
         "before_open": "The canvas is ready and waiting. Painting starts at 8:00 ET.",
-        "awaiting_design": "Waiting for the design agent to publish today's theme and 16 colors.",
+        "awaiting_design": "Waiting for the art director to publish today's theme and 16 colors.",
+        "review": "Waiting for the art director before the next slice opens.",
         "painting": "The morning is open. One artist holds the brush for this 3-minute slice.",
         "locked": "Locked. A morning lasts at most 36 minutes after 08:00 ET, and the next one starts blank.",
         "missed": "The morning passed without a design. Tomorrow starts blank.",
         "scheduled": "This canvas is scheduled.",
     }.get(status, status)
+
+
+def _parse_director_note(raw: Any) -> str:
+    if not isinstance(raw, str):
+        raise ApiError(400, "bad_note", "Note must be a string.")
+    text = raw.strip()
+    if not text or len(text) > DIRECTOR_NOTE_MAX:
+        raise ApiError(400, "bad_note", f"Note must be 1–{DIRECTOR_NOTE_MAX} characters.")
+    return text
 
 
 def _parse_note(raw: Any) -> str | None:
@@ -2281,8 +2722,8 @@ def _parse_design(payload: dict[str, Any]) -> tuple[str, str, list[dict[str, Any
     palette = payload.get("palette")
     if not isinstance(theme, str) or not theme.strip() or len(theme) > 80:
         raise ApiError(400, "bad_design", "Theme must be 1–80 characters.")
-    if not isinstance(brief, str) or not brief.strip() or len(brief) > 400:
-        raise ApiError(400, "bad_design", "Brief must be 1–400 characters.")
+    if not isinstance(brief, str) or not brief.strip() or len(brief) > BRIEF_MAX:
+        raise ApiError(400, "bad_design", f"Brief must be 1–{BRIEF_MAX} characters.")
     if not isinstance(palette, list) or len(palette) != 16:
         raise ApiError(400, "bad_design", "Palette must contain exactly 16 colors.")
     seen: dict[int, dict[str, Any]] = {}

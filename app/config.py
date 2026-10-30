@@ -33,6 +33,7 @@ class Settings:
         seats: dict[str, str] = {}
         for agent, env_name in (
             ("design", "TILE_SEAT_DESIGN"),
+            ("ross", "TILE_SEAT_ROSS"),
             ("claude", "TILE_SEAT_CLAUDE"),
             ("grok-artist", "TILE_SEAT_GROK"),
             ("openai", "TILE_SEAT_OPENAI"),

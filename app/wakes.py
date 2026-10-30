@@ -24,9 +24,16 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from app.schedule import SLICE_SECONDS, SliceMark, artist_on_slice
+from app.schedule import SLICE_COUNT, SLICE_SECONDS, SliceMark, artist_on_slice
 
-ALLOWED_EVENTS = ("slice_open", "slice_closed", "canvas_locked", "awaiting_design")
+ALLOWED_EVENTS = (
+    "slice_open",
+    "slice_closed",
+    "canvas_locked",
+    "awaiting_design",
+    "design_needed",
+)
+_EVENT_LIST = "slice_open, slice_closed, canvas_locked, awaiting_design, or design_needed"
 MAX_ATTEMPTS = 3
 INFLIGHT_STALE_SECONDS = 15
 MAX_POSTS_PER_DISPATCH = 8
@@ -190,14 +197,20 @@ def plan_wakes(
     now: datetime,
     lock_at: datetime,
     api_base_url: str,
+    brief: str | None = None,
+    director_note: str | None = None,
+    design_deadline: datetime | None = None,
+    holding_index: int | None = None,
 ) -> list[WakeIntent]:
     """Wakes that are still in their delivery window.
 
-    ``slice_open`` is only the seat that owns the live slice.
-    ``slice_closed`` is the slice that just closed, while the next one is open
-    (reviewers such as ross). After the session locks, that review and
-    ``canvas_locked`` stay eligible for one slice length.
-    ``awaiting_design`` is only while the morning is open and has no theme.
+    ``slice_open`` is only the seat that owns the live slice. Its body carries
+    the design brief and the latest director note for that artist.
+    ``slice_closed`` is the slice that just closed: during the review hold and
+    while the next slice is open (reviewers such as ross). After the session
+    locks, that review and ``canvas_locked`` stay eligible for one slice length.
+    ``design_needed`` and ``awaiting_design`` are only while the canvas is open
+    and has no theme. Neither of those bodies includes a brief.
     """
     if archived or not hooks:
         return []
@@ -217,6 +230,12 @@ def plan_wakes(
             "ends_at_unix": int(ends_at.timestamp()),
             "api_base_url": api_base_url,
         }
+        if event == "slice_open":
+            payload["brief"] = brief or ""
+            payload["director_note"] = director_note
+        elif event == "slice_closed" and slice_index >= 0:
+            nxt = slice_index + 1
+            payload["next_slice"] = nxt if nxt < SLICE_COUNT else None
         if event in ("slice_closed", "canvas_locked") or hook.seat_id == "ross":
             payload["render_url"] = f"/watch/canvas.png?day_id={day_id}&scale=2"
         intents.append(
@@ -233,9 +252,19 @@ def plan_wakes(
         )
 
     if not theme:
-        if phase == "during":
+        if phase in ("awaiting", "during", "before", "holding"):
+            ends = design_deadline or lock_at
+            for hook in by_event["design_needed"]:
+                add(hook, "design_needed", -3, ends)
             for hook in by_event["awaiting_design"]:
-                add(hook, "awaiting_design", -2, lock_at)
+                add(hook, "awaiting_design", -2, ends)
+        return _sorted(intents)
+
+    if phase == "holding" and holding_index is not None and holding_index > 0 and slices:
+        prev = slices[holding_index - 1]
+        if prev.acted or prev.missed:
+            for hook in by_event["slice_closed"]:
+                add(hook, "slice_closed", prev.index, prev.closes)
         return _sorted(intents)
 
     if phase == "during" and index is not None and order:
@@ -380,7 +409,13 @@ def _wake_row(conn: Any, intent: WakeIntent) -> Any:
 
 
 def _sorted(intents: list[WakeIntent]) -> list[WakeIntent]:
-    priority = {"awaiting_design": 0, "slice_open": 1, "slice_closed": 2, "canvas_locked": 3}
+    priority = {
+        "design_needed": 0,
+        "awaiting_design": 1,
+        "slice_open": 2,
+        "slice_closed": 3,
+        "canvas_locked": 4,
+    }
     return sorted(intents, key=lambda item: (priority.get(item.event, 9), item.slice_index, item.seat_id))
 
 
@@ -413,13 +448,9 @@ def _validate_events(events: object) -> frozenset[str]:
     if events is None:
         return frozenset({"slice_open"})
     if not isinstance(events, list) or not events or not all(isinstance(item, str) for item in events):
-        raise WebhookConfigError(
-            "events must list slice_open, slice_closed, canvas_locked, or awaiting_design."
-        )
+        raise WebhookConfigError(f"events must list {_EVENT_LIST}.")
     if any(item not in ALLOWED_EVENTS for item in events):
-        raise WebhookConfigError(
-            "events must list slice_open, slice_closed, canvas_locked, or awaiting_design."
-        )
+        raise WebhookConfigError(f"events must list {_EVENT_LIST}.")
     return frozenset(events)
 
 

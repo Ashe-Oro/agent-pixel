@@ -24,6 +24,7 @@ ROUNDS = 4
 ARTISTS = ("claude", "grok-artist", "openai")
 DISPLAY = {
     "design": "Design",
+    "ross": "Ross",
     "claude": "Claude",
     "grok-artist": "Grok Artist",
     "openai": "OpenAI",
@@ -56,6 +57,42 @@ class SessionClock:
     deadline: datetime | None
     lock_at: datetime
     slices: tuple[SliceMark, ...]
+    # When phase is "holding", the next slice is waiting on the review gate.
+    hold_until: datetime | None = None
+    holding_index: int | None = None
+
+
+def env_seconds(name: str, default: int) -> int:
+    """Non-negative integer from the environment. Blank or invalid uses ``default``.
+
+    Zero is a real value: it disables the wait that uses this setting.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    if value < 0:
+        return default
+    return value
+
+
+def note_gate_seconds() -> int:
+    """How long the next slice waits for Ross's note. ``TILE_NOTE_GATE_SECONDS``.
+
+    Default 75. ``0`` opens the next slice as soon as the previous one closes.
+    """
+    return env_seconds("TILE_NOTE_GATE_SECONDS", 75)
+
+
+def design_wait_seconds() -> int:
+    """How long a new canvas waits for Ross's design. ``TILE_DESIGN_WAIT_SECONDS``.
+
+    Default 300 (five minutes). ``0`` applies the fallback design on the next check.
+    """
+    return env_seconds("TILE_DESIGN_WAIT_SECONDS", 300)
 
 
 def ny_date(now: datetime) -> str:
@@ -79,62 +116,128 @@ def slice_window(d: date, index: int) -> tuple[datetime, datetime]:
     return begin, end
 
 
+def _gate_release(
+    previous_close: datetime,
+    index: int,
+    gate: int,
+    notes: dict[int, datetime],
+) -> datetime:
+    """When slice ``index`` may open after ``previous_close``.
+
+    A note posted at or before the previous slice closed skips the wait.
+    A note posted during the wait opens the slice at that moment.
+    Otherwise the slice opens ``gate`` seconds after the previous close.
+    """
+    timeout = previous_close + timedelta(seconds=gate)
+    noted = notes.get(index)
+    if noted is None:
+        return timeout
+    noted_local = noted.astimezone(NY)
+    if noted_local <= previous_close:
+        return previous_close
+    if noted_local < timeout:
+        return noted_local
+    return timeout
+
+
 def walk_session(
     opens_at: datetime,
     acted_at: dict[int, datetime] | None,
     now: datetime,
+    gate_seconds: int = 0,
+    note_at: dict[int, datetime] | None = None,
 ) -> SessionClock:
     """Where a session is, given when each slice opened and which ones were used.
 
     ``acted_at`` maps a slice index to the time its paint or pass was stored.
-    A used slice closes at that time, and the next slice opens then. An unused
-    slice closes ``SLICE_SECONDS`` after it opened.
+    A used slice closes at that time. With ``gate_seconds`` of 0 the next slice
+    opens then. A positive gate holds the next real slice until Ross's note
+    for that slice or until the gate elapses. An unused slice closes
+    ``SLICE_SECONDS`` after it opened. A done-skip recorded before a slice
+    would open closes in zero time and does not add a review wait.
     """
     start = opens_at.astimezone(NY)
     local = now.astimezone(NY)
     actions = acted_at or {}
+    notes = note_at or {}
+    gate = gate_seconds if gate_seconds > 0 else 0
     cursor = start
     marks: list[SliceMark] = []
     live_index: int | None = None
     live_deadline: datetime | None = None
     parked = False
+    gate_hold = False
+    holding_index: int | None = None
+    hold_until: datetime | None = None
     for index in range(SLICE_COUNT):
-        deadline = cursor + timedelta(seconds=SLICE_SECONDS)
         raw = actions.get(index)
-        if raw is not None:
-            acted_local = raw.astimezone(NY)
-            close = acted_local if acted_local < deadline else deadline
+        raw_local = raw.astimezone(NY) if raw is not None else None
+        if parked:
+            if raw_local is not None and raw_local <= cursor:
+                deadline = cursor + timedelta(seconds=SLICE_SECONDS)
+                marks.append(SliceMark(index, cursor, deadline, cursor, True, False))
+                continue
+            deadline = cursor + timedelta(seconds=SLICE_SECONDS)
+            marks.append(SliceMark(index, cursor, deadline, deadline, False, False))
+            cursor = deadline
+            continue
+        instant = raw_local is not None and raw_local <= cursor
+        if not instant and index > 0 and gate:
+            release = _gate_release(cursor, index, gate, notes)
+            if local < release:
+                parked = True
+                gate_hold = True
+                holding_index = index
+                hold_until = release
+                deadline = release + timedelta(seconds=SLICE_SECONDS)
+                marks.append(SliceMark(index, release, deadline, deadline, False, False))
+                cursor = deadline
+                continue
+            if release > cursor:
+                cursor = release
+        deadline = cursor + timedelta(seconds=SLICE_SECONDS)
+        if instant:
+            marks.append(SliceMark(index, cursor, deadline, cursor, True, False))
+            continue
+        if raw_local is not None:
+            close = raw_local if raw_local < deadline else deadline
             if close < cursor:
                 close = cursor
             marks.append(SliceMark(index, cursor, deadline, close, True, False))
             cursor = close
             continue
-        if not parked and local < cursor:
+        if local < cursor:
             parked = True
             marks.append(SliceMark(index, cursor, deadline, deadline, False, False))
             cursor = deadline
             continue
-        if not parked and local < deadline:
+        if local < deadline:
             parked = True
             live_index = index
             live_deadline = deadline
             marks.append(SliceMark(index, cursor, deadline, deadline, False, False))
             cursor = deadline
             continue
-        if not parked:
-            marks.append(SliceMark(index, cursor, deadline, deadline, False, True))
-            cursor = deadline
-            continue
-        marks.append(SliceMark(index, cursor, deadline, deadline, False, False))
+        marks.append(SliceMark(index, cursor, deadline, deadline, False, True))
         cursor = deadline
     lock_at = cursor
     if local < start:
         phase, index = "before", None
+    elif gate_hold and live_index is None:
+        phase, index = "holding", None
     elif live_index is None:
         phase, index = "after", None
     else:
         phase, index = "during", live_index
-    return SessionClock(phase, index, live_deadline, lock_at, tuple(marks))
+    return SessionClock(
+        phase,
+        index,
+        live_deadline,
+        lock_at,
+        tuple(marks),
+        hold_until,
+        holding_index,
+    )
 
 
 def position(now: datetime) -> tuple[str, int | None]:

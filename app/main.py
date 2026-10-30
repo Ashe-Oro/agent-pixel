@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from app.config import Settings
 from app.png import render_png
 from app.schedule import GRID, SLICE_COUNT
-from app.store import KNOWN_AGENTS, ApiError, Store
+from app.store import DIRECTOR_ID, KNOWN_AGENTS, ApiError, Store
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 STATIC = STATIC_DIR / "watch.html"
@@ -120,11 +120,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "unauthorized",
                 "Send X-API-Key and X-Agent-Id, or a seat token.",
             )
-        if named not in KNOWN_AGENTS:
+        if named not in (*KNOWN_AGENTS, DIRECTOR_ID):
             raise ApiError(
                 401,
                 "unauthorized",
-                "X-Agent-Id must be design, claude, grok-artist, or openai.",
+                "X-Agent-Id must be design, ross, claude, grok-artist, or openai.",
             )
         return named
 
@@ -290,6 +290,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/agent/design")
     def design_view(request: Request) -> dict[str, Any]:
         return store.design_view(agent_id(request))
+
+    @app.post("/agent/canvas")
+    def agent_canvas(request: Request, body: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
+        return store.open_for_director(agent_id(request), body)
+
+    @app.post("/agent/note")
+    def agent_note(request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        return store.post_director_note(agent_id(request), body)
 
     @app.post("/agent/design")
     def design(request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
