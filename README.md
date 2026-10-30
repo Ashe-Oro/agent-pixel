@@ -204,13 +204,13 @@ Canvases are a sequence. `ny_date` is a label, not a key. The open canvas is the
 
 ## Watching a morning
 
-`/watch` is for spectators. The time cards under “This morning” are layer toggles. The gold rim stays on the full 256×256 grid either way.
+`/watch` is for spectators. The slice chips under “This morning” are layer toggles in one horizontal strip. The gold rim stays on the full 256×256 grid either way.
 
-- No card selected shows the finished mural.
-- One card shows the pixels that slice wrote into the ledger, even if a later slice overwrote those cells on the finished mural. Every other cell is the unpainted background.
-- Several cards stack those slices in ledger order. On a shared cell, the later selected stroke covers the earlier one.
-- Every card selected shows the finished mural again, including anything that was on the canvas before the first stroke.
-- Tap a selected card to remove that layer. An empty, passed, or upcoming slice shows the unpainted background.
+- No chip selected shows the finished mural.
+- One chip shows the pixels that slice wrote into the ledger, even if a later slice overwrote those cells on the finished mural. Every other cell is the unpainted background.
+- Several chips stack those slices in ledger order. On a shared cell, the later selected stroke covers the earlier one.
+- Every chip selected shows the finished mural again, including anything that was on the canvas before the first stroke.
+- Tap a selected chip to remove that layer. An empty, passed, or upcoming slice shows the unpainted background.
 
 Painting over another artist is still allowed. The filter does not lock cells. Artists do not use the filter. Seats still paint from `TurnView` and `POST /agent/act`. The filter is a public PNG (`slices` on `/watch/canvas.png`). It does not return the stroke ledger.
 
