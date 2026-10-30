@@ -1,6 +1,7 @@
-from datetime import date
+from datetime import date, timedelta
 
 from app.schedule import (
+    RedoWindow,
     artist_on_slice,
     configured_slice_count,
     day_bounds,
@@ -8,6 +9,7 @@ from app.schedule import (
     lock_label,
     parse_ny_local,
     position,
+    redo_seconds,
     rotate,
     round_on_slice,
     slice_window,
@@ -117,6 +119,69 @@ def test_review_gate_holds_until_a_note_or_the_timeout():
     )
     assert legacy.phase == "holding"
     assert len(legacy.slices) == 12
+
+
+def test_redo_shifts_the_following_gate_and_the_lock():
+    assert redo_seconds() == 120
+    start = parse_ny_local("2026-10-28T08:00:00")
+    acted = {0: parse_ny_local("2026-10-28T08:00:10")}
+    veto = parse_ny_local("2026-10-28T08:00:20")
+    plain = walk_session(start, acted, parse_ny_local("2026-10-28T08:00:30"), gate_seconds=75)
+    assert plain.phase == "holding"
+    assert plain.holding_index == 1
+    live = walk_session(
+        start,
+        acted,
+        parse_ny_local("2026-10-28T08:00:30"),
+        gate_seconds=75,
+        redos={0: RedoWindow(veto, None, 120)},
+    )
+    assert live.phase == "during"
+    assert live.index == 0
+    assert live.slices[0].redo is True
+    assert live.deadline == veto + timedelta(seconds=120)
+    redo_close = parse_ny_local("2026-10-28T08:02:20")
+    held = walk_session(
+        start,
+        acted,
+        parse_ny_local("2026-10-28T08:02:30"),
+        gate_seconds=75,
+        redos={0: RedoWindow(veto, redo_close, 120)},
+    )
+    assert held.phase == "holding"
+    assert held.holding_index == 1
+    assert held.slices[1].opens == redo_close + timedelta(seconds=75)
+    stale = walk_session(
+        start,
+        acted,
+        parse_ny_local("2026-10-28T08:02:30"),
+        gate_seconds=75,
+        note_at={1: parse_ny_local("2026-10-28T08:00:15")},
+        redos={0: RedoWindow(veto, redo_close, 120)},
+    )
+    assert stale.phase == "holding"
+    released = walk_session(
+        start,
+        acted,
+        redo_close,
+        gate_seconds=75,
+        note_at={1: parse_ny_local("2026-10-28T08:01:00")},
+        redos={0: RedoWindow(veto, redo_close, 120)},
+    )
+    assert released.phase == "during"
+    assert released.index == 1
+    later = parse_ny_local("2026-10-28T12:00:00")
+    no_redo = walk_session(start, acted, later, gate_seconds=75)
+    with_redo = walk_session(
+        start,
+        acted,
+        later,
+        gate_seconds=75,
+        redos={0: RedoWindow(veto, redo_close, 120)},
+    )
+    assert with_redo.phase == "after"
+    assert no_redo.slices[1].opens == acted[0] + timedelta(seconds=75)
+    assert with_redo.lock_at - no_redo.lock_at == redo_close - acted[0]
 
 
 def test_rotation_by_day_index():

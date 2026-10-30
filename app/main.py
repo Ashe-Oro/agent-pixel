@@ -7,6 +7,7 @@ Artist seats: design, TurnView, one paint or pass.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import logging
 import os
@@ -47,6 +48,16 @@ def _parse_slices(raw: str | None) -> list[int] | None:
             raise ApiError(400, "bad_slices", "slices must be comma-separated indices.")
         indices.append(int(part))
     return indices
+
+
+def _png_headers(canvas: bytes, scale: int, variant: list[int] | None) -> dict[str, str]:
+    """ETag changes when the pixels do, so a veto cannot be served from a stale copy."""
+    digest = hashlib.sha256(canvas).hexdigest()[:16]
+    suffix = "all" if not variant else ",".join(str(part) for part in variant)
+    return {
+        "Cache-Control": "no-store",
+        "ETag": f'"{digest}-{scale}-{suffix}"',
+    }
 
 
 def _key_ok(got: str, expected: str) -> bool:
@@ -183,9 +194,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/watch/canvas.png")
     def canvas_png(day_id: int, scale: int = 3, slices: str | None = None) -> Response:
-        canvas, palette = store.canvas_for_slices(day_id, _parse_slices(slices))
+        chosen = _parse_slices(slices)
+        canvas, palette = store.canvas_for_slices(day_id, chosen)
         payload = render_png(canvas, palette, scale=scale)
-        return Response(payload, media_type="image/png", headers={"Cache-Control": "no-store"})
+        return Response(payload, media_type="image/png", headers=_png_headers(canvas, scale, chosen))
 
     @app.get("/watch/crop.png")
     def crop_png(day_id: int, x: int, y: int, w: int, h: int, scale: int = 4) -> Response:
@@ -193,7 +205,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise ApiError(400, "bad_focus", "Crop is outside the 256×256 canvas.")
         canvas, palette = store.canvas_of(day_id)
         payload = render_png(canvas, palette, scale=scale, crop=(x, y, w, h))
-        return Response(payload, media_type="image/png", headers={"Cache-Control": "no-store"})
+        return Response(
+            payload,
+            media_type="image/png",
+            headers=_png_headers(canvas, scale, [x, y, w, h]),
+        )
 
     @app.post("/host/days/open")
     def open_day(request: Request) -> dict[str, Any]:
@@ -304,6 +320,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/agent/note")
     def agent_note(request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
         return store.post_director_note(agent_id(request), body)
+
+    @app.post("/agent/veto")
+    def agent_veto(request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        return store.veto_slice(agent_id(request), body)
 
     @app.post("/agent/design")
     def design(request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
