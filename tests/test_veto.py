@@ -123,7 +123,8 @@ def test_veto_restores_overwrites_and_reopens_the_same_seat(client, monkeypatch)
     owner = client.get("/agent/turn", headers=auth("grok-artist")).json()
     assert owner["to_act"] is True
     assert owner["redo"] is True
-    assert owner["veto_note"] == REASON
+    assert owner["director_note"] == "VETO: " + REASON
+    assert owner["veto_note"] == "VETO: " + REASON
     assert owner["slice_index"] == 1
     assert owner["turns_remaining"] == turns_before
     assert owner["slice_ends_at_unix"] - owner["slice_starts_at_unix"] == 120
@@ -170,7 +171,8 @@ def test_veto_restores_overwrites_and_reopens_the_same_seat(client, monkeypatch)
     assert len(opens) == 1
     assert opens[0]["seat"] == "grok-artist"
     assert opens[0]["slice"] == 1
-    assert opens[0]["veto_note"] == REASON
+    assert opens[0]["veto_note"] == "VETO: " + REASON
+    assert opens[0]["director_note"] == "VETO: " + REASON
     assert all("redo" not in item for item in payloads(seen) if item["event"] == "slice_open" and item["slice"] == 0)
 
     redone = client.post(
@@ -438,3 +440,150 @@ def test_mid_run_canvas_without_a_veto_keeps_its_clock(tmp_path, monkeypatch):
             assert live.get("/watch/state").json()["slices"][0]["state"] == "done"
     finally:
         app.state.store.close()
+
+
+def _block(count, color):
+    return [{"x": index % 256, "y": index // 256, "color": color} for index in range(count)]
+
+
+def test_redo_turn_director_note_carries_the_veto_reason(client, monkeypatch):
+    monkeypatch.setenv("TILE_NOTE_GATE_SECONDS", "75")
+    monkeypatch.setenv("CRON_SECRET", "cron-secret")
+    seen = install_poster(monkeypatch)
+    open_design(client, "2026-10-28T08:00:00")
+    set_hook(client, "claude", ["slice_open"])
+    assert client.post(
+        "/agent/act",
+        headers=auth("claude"),
+        json={"type": "paint", "pixels": [{"x": 2, "y": 2, "color": 3}]},
+    ).status_code == 200
+    vetoed = client.post(
+        "/agent/veto",
+        headers=auth("ross"),
+        json={"slice": 0, "reason": REASON},
+    )
+    assert vetoed.status_code == 200, vetoed.text
+    turn = client.get("/agent/turn", headers=auth("claude")).json()
+    assert turn["redo"] is True
+    assert turn["to_act"] is True
+    assert REASON in turn["director_note"]
+    assert turn["director_note"] == "VETO: " + REASON
+    assert turn["veto_note"] == "VETO: " + REASON
+    assert REASON not in client.get("/watch/state").text
+    opens = [item for item in payloads(seen) if item.get("redo") is True]
+    assert len(opens) == 1
+    assert opens[0]["event"] == "slice_open"
+    assert opens[0]["director_note"] == "VETO: " + REASON
+    assert opens[0]["veto_note"] == "VETO: " + REASON
+
+
+def test_small_redo_paint_stays(client, monkeypatch):
+    monkeypatch.setenv("TILE_NOTE_GATE_SECONDS", "75")
+    opened = open_design(client, "2026-10-28T08:00:00")
+    day_id = opened["day_id"]
+    assert client.post("/agent/act", headers=auth("claude"), json={"type": "pass"}).status_code == 200
+    assert client.post("/agent/veto", headers=auth("ross"), json={"slice": 0, "reason": "tighten"}).status_code == 200
+    kept = client.post(
+        "/agent/act",
+        headers=auth("claude"),
+        json={"type": "paint", "pixels": _block(100, 5)},
+    )
+    assert kept.status_code == 200, kept.text
+    assert cells(client, day_id, 0, 0) == [5]
+    assert client.get("/watch/state").json()["status"] == "review"
+
+
+def test_damaging_redo_reverts_and_opens_the_gate(client, monkeypatch):
+    monkeypatch.setenv("TILE_NOTE_GATE_SECONDS", "75")
+    opened = open_design(client, "2026-10-28T08:00:00")
+    day_id = opened["day_id"]
+    assert client.post(
+        "/agent/act",
+        headers=auth("claude"),
+        json={"type": "paint", "pixels": [{"x": 4, "y": 4, "color": 2}]},
+    ).status_code == 200
+    assert client.post("/agent/veto", headers=auth("ross"), json={"slice": 0, "reason": "again"}).status_code == 200
+    before = client.get("/watch/canvas.png", params={"day_id": day_id, "scale": 1})
+    preview = client.get("/agent/turn", headers=auth("claude")).json()["preview_url"]
+    flood = client.post(
+        "/agent/act",
+        headers=auth("claude"),
+        json={"type": "paint", "pixels": _block(40000, 8)},
+    )
+    assert flood.status_code == 422, flood.text
+    assert flood.json()["error"] == "overfill_reverted"
+    assert "reverted" in flood.json()["message"]
+    assert cells(client, day_id, 4, 4) == [0]
+    after = client.get("/watch/canvas.png", params={"day_id": day_id, "scale": 1})
+    assert after.content == before.content
+    assert after.headers["etag"] == before.headers["etag"]
+    blank_layer = client.get("/watch/canvas.png", params={"day_id": day_id, "scale": 1, "slices": "0"})
+    assert list(Image.open(BytesIO(blank_layer.content)).get_flattened_data()) == list(
+        Image.open(BytesIO(before.content)).get_flattened_data()
+    )
+    state = client.get("/watch/state").json()
+    assert state["status"] == "review"
+    chip = state["slices"][0]
+    assert chip["state"] == "reverted"
+    assert [item["state"] for item in chip["history"]] == ["vetoed", "reverted"]
+    assert chip["history"][1]["removed"] is True
+    assert "Reverted" in client.get("/watch").text
+    assert "again" not in client.get("/watch/state").text
+    later = client.get("/agent/turn", headers=auth("claude")).json()
+    assert later["to_act"] is False
+    assert "&v=" in later["preview_url"]
+    assert later["preview_url"] != preview
+    assert client.get(later["preview_url"]).content == client.get(
+        f"/watch/canvas.png?day_id={day_id}&scale=3"
+    ).content
+    again = client.post(
+        "/agent/act",
+        headers=auth("claude"),
+        json={"type": "paint", "pixels": [{"x": 1, "y": 1, "color": 1}]},
+    )
+    assert again.status_code == 409
+    noted = client.post("/agent/note", headers=auth("ross"), json={"note": "next", "slice": 1})
+    assert noted.status_code == 200, noted.text
+    assert noted.json()["released"] is True
+    grok = client.get("/agent/turn", headers=auth("grok-artist")).json()
+    assert grok["to_act"] is True
+    assert grok["slice_index"] == 1
+    assert grok["redo"] is False
+    ledger = client.get(f"/host/days/{day_id}/ledger", headers=host()).json()
+    reverted = [stroke for stroke in ledger["strokes"] if stroke["state"] == "reverted"]
+    assert len(reverted) == 1
+    assert reverted[0]["pixel_count"] == 40000
+    assert "reverted" in reverted[0]["revert_reason"]
+
+
+def test_one_color_redo_just_under_five_percent_stays(client, monkeypatch):
+    monkeypatch.setenv("TILE_NOTE_GATE_SECONDS", "75")
+    opened = open_design(client, "2026-10-28T08:00:00")
+    day_id = opened["day_id"]
+    assert client.post("/agent/act", headers=auth("claude"), json={"type": "pass"}).status_code == 200
+    assert client.post("/agent/veto", headers=auth("ross"), json={"slice": 0, "reason": "fill"}).status_code == 200
+    kept = client.post(
+        "/agent/act",
+        headers=auth("claude"),
+        json={"type": "paint", "pixels": _block(3276, 6)},
+    )
+    assert kept.status_code == 200, kept.text
+    assert cells(client, day_id, 0, 0) == [6]
+
+
+def test_one_color_redo_over_five_percent_reverts(client, monkeypatch):
+    monkeypatch.setenv("TILE_NOTE_GATE_SECONDS", "75")
+    opened = open_design(client, "2026-10-28T08:00:00")
+    day_id = opened["day_id"]
+    assert client.post("/agent/act", headers=auth("claude"), json={"type": "pass"}).status_code == 200
+    assert client.post("/agent/veto", headers=auth("ross"), json={"slice": 0}).status_code == 200
+    flooded = client.post(
+        "/agent/act",
+        headers=auth("claude"),
+        json={"type": "paint", "pixels": _block(3277, 6)},
+    )
+    assert flooded.status_code == 422
+    assert flooded.json()["error"] == "overfill_reverted"
+    assert cells(client, day_id, 0, 0) == [0]
+    assert client.get("/watch/state").json()["slices"][0]["state"] == "reverted"
+    assert client.get("/agent/turn", headers=auth("claude")).json()["to_act"] is False

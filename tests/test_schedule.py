@@ -1,6 +1,7 @@
 from datetime import date, timedelta
 
 from app.schedule import (
+    GRID,
     RedoWindow,
     artist_on_slice,
     configured_slice_count,
@@ -9,6 +10,9 @@ from app.schedule import (
     lock_label,
     parse_ny_local,
     position,
+    redo_max_dominant,
+    redo_max_fraction,
+    redo_overfill,
     redo_seconds,
     rotate,
     round_on_slice,
@@ -182,6 +186,22 @@ def test_redo_shifts_the_following_gate_and_the_lock():
     assert with_redo.phase == "after"
     assert no_redo.slices[1].opens == acted[0] + timedelta(seconds=75)
     assert with_redo.lock_at - no_redo.lock_at == redo_close - acted[0]
+
+
+def test_redo_overfill_limits():
+    assert redo_max_fraction() == 0.35
+    assert redo_max_dominant() == 0.6
+    blank = bytes(GRID * GRID)
+    assert redo_overfill(blank, [(0, 0, 1)]) is None
+    # Just under 5% of one color is a touch-up, not a flood.
+    under = [(index % GRID, index // GRID, 4) for index in range(3276)]
+    assert redo_overfill(blank, under) is None
+    over_share = [(index % GRID, index // GRID, 4) for index in range(3277)]
+    assert "one color" in redo_overfill(blank, over_share)
+    # More than 35% reverts even when the colors are split.
+    half = 22938 // 2
+    wide = [(index % GRID, index // GRID, 1 if index < half else 2) for index in range(22938)]
+    assert "35%" in redo_overfill(blank, wide)
 
 
 def test_rotation_by_day_index():

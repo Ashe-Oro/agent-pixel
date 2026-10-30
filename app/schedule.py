@@ -119,6 +119,77 @@ def redo_seconds() -> int:
     return env_seconds("TILE_REDO_SECONDS", 120)
 
 
+def env_fraction(name: str, default: float) -> float:
+    """Fraction from the environment, from 0 through 1. Blank or invalid uses ``default``."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if value < 0 or value > 1:
+        return default
+    return value
+
+
+def redo_max_fraction() -> float:
+    """Share of the canvas one redo paint may change. ``TILE_REDO_MAX_FRACTION``.
+
+    Default 0.35. A redo that changes more than this is reverted.
+    """
+    return env_fraction("TILE_REDO_MAX_FRACTION", 0.35)
+
+
+def redo_max_dominant() -> float:
+    """Largest single-color share of a redo's changed cells. ``TILE_REDO_MAX_DOMINANT``.
+
+    Default 0.6. Applied only when the redo also changes more than 5% of the canvas.
+    """
+    return env_fraction("TILE_REDO_MAX_DOMINANT", 0.6)
+
+
+# The one-color rule stays quiet for a small touch-up.
+REDO_DOMINANT_MIN_SHARE = 0.05
+
+
+def redo_overfill(before: bytes, collapsed: list[tuple[int, int, int]]) -> str | None:
+    """Why a redo paint should be reverted, or None when it may stay.
+
+    ``collapsed`` is unique cells, last color wins, in paint order. A cell
+    counts only when the new color differs from the canvas the redo started on.
+    """
+    total = GRID * GRID
+    if total < 1 or len(before) != total:
+        return None
+    changed: list[int] = []
+    for x, y, color in collapsed:
+        if before[y * GRID + x] != color:
+            changed.append(color)
+    if not changed:
+        return None
+    share = len(changed) / total
+    fraction = redo_max_fraction()
+    if share > fraction:
+        return (
+            f"That redo changed {len(changed)} cells, {round(100 * share)}% of the canvas, "
+            f"over the {round(100 * fraction)}% limit. The paint was reverted and the review gate is open."
+        )
+    if share > REDO_DOMINANT_MIN_SHARE:
+        counts: dict[int, int] = {}
+        for color in changed:
+            counts[color] = counts.get(color, 0) + 1
+        dominant = max(counts.values()) / len(changed)
+        cap = redo_max_dominant()
+        if dominant > cap:
+            return (
+                f"That redo changed {len(changed)} cells and one color was "
+                f"{round(100 * dominant)}% of them, over the {round(100 * cap)}% limit. "
+                f"The paint was reverted and the review gate is open."
+            )
+    return None
+
+
 def design_wait_seconds() -> int:
     """How long a new canvas waits for Ross's design. ``TILE_DESIGN_WAIT_SECONDS``.
 
