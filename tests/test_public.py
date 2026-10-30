@@ -31,7 +31,10 @@ def test_watch_page_uses_crisp_pixels(client):
     assert 'src="/static/mascot.png"' in page
     assert "image-rendering: pixelated" in page
     assert "image-rendering: crisp-edges" in page
-    assert "repeat(3, minmax(0, 1fr))" in page
+    assert 'id="slice-prev"' in page
+    assert 'id="slice-next"' in page
+    assert "overflow-x: auto" in page
+    assert "repeat(3, minmax(0, 1fr))" not in page
     assert "54 minutes" in page
     assert "36 minutes" not in page
     assert "of ${esc(roundTotal)}" in page

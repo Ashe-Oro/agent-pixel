@@ -74,6 +74,31 @@ def test_watch_slice_cards_are_layer_toggles(client):
     assert "dev clock pinned" not in page
     assert "dev clock is pinned" not in page
     assert "/host/clock" not in page
+    assert "data.brief" not in page
+    assert "director_note" not in page
+
+
+def test_watch_slice_strip_is_a_carousel(client):
+    """Layer chips scroll in slice order for any count the API returns."""
+    page = client.get("/watch").text
+    assert 'id="select-all"' in page
+    assert 'id="select-none"' in page
+    assert 'id="slice-prev"' in page
+    assert 'id="slice-next"' in page
+    assert 'id="slices"' in page
+    assert "overflow-x: auto" in page
+    assert "ArrowRight" in page
+    assert "ArrowLeft" in page
+    assert "round-break" in page
+    assert "artistInitial" in page
+    assert "anchorIndex" in page
+    assert "scrollLeft" in page
+    assert "slices.map" in page
+    assert "repeat(3, minmax(0, 1fr))" not in page
+    script = page.split("<script>", 1)[1]
+    board = script.split("function paintBoard", 1)[1].split("function syncSliceActions", 1)[0]
+    assert "18" not in board
+    assert "12" not in board
 
 
 def test_subset_replay_and_default_full_view(client):

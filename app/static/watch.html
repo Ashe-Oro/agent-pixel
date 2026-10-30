@@ -90,22 +90,107 @@
       font-size: 20px;
       font-weight: 600;
     }
-    .slices {
+    .slice-rail {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      grid-template-areas:
+        "actions actions actions"
+        "prev strip next";
       gap: 8px;
-      padding-bottom: 6px;
+      align-items: center;
+    }
+    .slices {
+      grid-area: strip;
+      display: flex;
+      flex-direction: row;
+      align-items: stretch;
+      gap: 8px;
+      min-width: 0;
+      min-height: 72px;
+      overflow-x: auto;
+      overflow-y: hidden;
+      scroll-snap-type: x proximity;
+      scroll-padding-inline: 4px;
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior-x: contain;
+      touch-action: pan-x pan-y;
+      padding: 2px 2px 6px;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255, 211, 106, 0.5) transparent;
+      user-select: none;
+    }
+    .slices::-webkit-scrollbar { height: 8px; }
+    .slices::-webkit-scrollbar-thumb {
+      background: rgba(255, 211, 106, 0.45);
+      border-radius: 99px;
+    }
+    .slices:focus-visible {
+      outline: 2px solid var(--gold);
+      outline-offset: 2px;
     }
     .slice {
+      position: relative;
+      flex: 0 0 auto;
+      width: 148px;
+      scroll-snap-align: start;
       background: rgba(244, 239, 228, 0.06);
       border: 1px solid rgba(244, 239, 228, 0.1);
+      border-top: 3px solid rgba(244, 239, 228, 0.35);
       border-radius: 10px;
-      padding: 8px;
-      min-height: 84px;
+      padding: 5px 8px 6px;
     }
-    .slice .when { display: block; font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 12px; color: var(--cream-dim); }
-    .slice .who { display: block; margin-top: 4px; font-weight: 650; }
-    .slice .meta { display: block; margin-top: 2px; font-size: 12px; color: var(--cream-dim); }
+    .slice.round-break { margin-left: 12px; }
+    .slice.round-break::before {
+      content: "";
+      position: absolute;
+      left: -11px;
+      top: 8px;
+      bottom: 8px;
+      width: 2px;
+      border-radius: 99px;
+      background: rgba(255, 211, 106, 0.55);
+    }
+    .slice .top {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      min-width: 0;
+    }
+    .slice .initial {
+      display: inline-grid;
+      place-items: center;
+      width: 18px;
+      height: 18px;
+      border-radius: 99px;
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1;
+      background: rgba(244, 239, 228, 0.28);
+      color: var(--ink);
+      flex: none;
+    }
+    .slice .who {
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1.1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+    }
+    .slice .round {
+      margin-left: auto;
+      flex: none;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      padding: 1px 5px;
+      border-radius: 99px;
+      background: rgba(244, 239, 228, 0.12);
+      color: var(--cream);
+    }
+    .slice .when { display: block; margin-top: 3px; font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 11px; letter-spacing: -0.03em; white-space: nowrap; color: var(--cream-dim); }
+    .slice .meta { display: block; margin-top: 1px; font-size: 11px; color: var(--cream-dim); white-space: nowrap; }
     .slice.active { background: rgba(255, 211, 106, 0.16); border-color: var(--gold); }
     .slice.review { background: rgba(154, 182, 255, 0.16); border-color: #9ab6ff; }
     .slice.done { background: rgba(126, 174, 92, 0.16); border-color: rgba(126, 174, 92, 0.6); }
@@ -115,13 +200,13 @@
       color: inherit;
       font: inherit;
       text-align: left;
-      width: 100%;
+      width: 148px;
       cursor: pointer;
       touch-action: manipulation;
     }
     button.slice:focus-visible {
       outline: 2px solid var(--gold);
-      outline-offset: 2px;
+      outline-offset: -2px;
     }
     .slice.selected {
       background: var(--gold);
@@ -133,7 +218,9 @@
     .slice.selected .when,
     .slice.selected .meta { color: rgba(28, 20, 15, 0.72); }
     .slice.selected .who,
-    .slice.selected .layer { color: var(--ink); }
+    .slice.selected .layer,
+    .slice.selected .round { color: var(--ink); }
+    .slice.selected .round { background: rgba(28, 20, 15, 0.12); }
     .slice .pip {
       display: inline-block;
       width: 7px;
@@ -150,23 +237,61 @@
     .slice.selected .pip { box-shadow: 0 0 0 1px rgba(28, 20, 15, 0.55); }
     .slice .layer {
       display: block;
-      margin-top: 4px;
-      font-size: 11px;
+      margin-top: 1px;
+      font-size: 10px;
       font-weight: 700;
       letter-spacing: 0.06em;
       text-transform: uppercase;
       color: var(--cream-dim);
     }
+    .slice.artist-claude { border-top-color: #e7c07a; }
+    .slice.artist-grok-artist { border-top-color: #ff7a3c; }
+    .slice.artist-openai { border-top-color: #9ab6ff; }
+    .slice.artist-claude .initial { background: #e7c07a; }
+    .slice.artist-grok-artist .initial { background: #ff7a3c; }
+    .slice.artist-openai .initial { background: #9ab6ff; }
     .slice-hint {
-      margin: 0 0 10px;
-      max-width: 68ch;
+      margin: 0 0 8px;
+      max-width: 78ch;
       color: var(--cream-dim);
       font-size: 14px;
     }
     .slice-actions {
+      grid-area: actions;
       display: flex;
       gap: 8px;
-      margin: 0 0 10px;
+      margin: 0;
+    }
+    button.slice-nav {
+      appearance: none;
+      width: 36px;
+      align-self: stretch;
+      min-height: 64px;
+      border-radius: 10px;
+      border: 1px solid rgba(244, 239, 228, 0.18);
+      background: rgba(244, 239, 228, 0.06);
+      color: var(--cream);
+      font: inherit;
+      font-size: 22px;
+      line-height: 1;
+      padding: 0;
+      cursor: pointer;
+    }
+    #slice-prev { grid-area: prev; }
+    #slice-next { grid-area: next; }
+    button.slice-nav:disabled {
+      opacity: 0.35;
+      cursor: default;
+    }
+    button.slice-nav:focus-visible {
+      outline: 2px solid var(--gold);
+      outline-offset: 2px;
+    }
+    @media (min-width: 861px) {
+      .slice-rail {
+        grid-template-columns: auto auto minmax(0, 1fr) auto;
+        grid-template-areas: "actions prev strip next";
+      }
     }
     button.slice-action {
       appearance: none;
@@ -190,7 +315,6 @@
       outline: 2px solid var(--gold);
       outline-offset: 2px;
     }
-    .slice { min-width: 0; }
     main {
       display: grid;
       grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.8fr);
@@ -329,6 +453,8 @@
       .clock { text-align: left; }
       main { grid-template-columns: 1fr; }
       img.mascot { width: 56px; }
+      .slice, button.slice { width: 118px; }
+      button.slice-nav { width: 32px; min-height: 0; }
     }
     @media (prefers-reduced-motion: reduce) {
       * { scroll-behavior: auto; }
@@ -353,12 +479,16 @@
   <div class="banner" id="banner" hidden></div>
   <section class="schedule">
     <h2 id="schedule-title">This morning</h2>
-    <p class="slice-hint" id="slice-hint">Tap a time card to show only that artist’s strokes. Tap more to stack layers. Tap again to remove one. None or every card shows the full painting. Select all turns every card on. Select none clears them.</p>
-    <div class="slice-actions" role="group" aria-label="Slice selection">
-      <button type="button" id="select-all" class="slice-action" aria-pressed="false">Select all</button>
-      <button type="button" id="select-none" class="slice-action" aria-pressed="false">Select none</button>
+    <p class="slice-hint" id="slice-hint">Swipe the strip, or use the arrows and arrow keys. Tap a chip to show that slice’s strokes. Tap more to stack layers. Tap again to remove one. None or every chip shows the full painting. Select all turns every chip on. Select none clears them.</p>
+    <div class="slice-rail">
+      <div class="slice-actions" role="group" aria-label="Slice selection">
+        <button type="button" id="select-all" class="slice-action" aria-pressed="false">Select all</button>
+        <button type="button" id="select-none" class="slice-action" aria-pressed="false">Select none</button>
+      </div>
+      <button type="button" class="slice-nav" id="slice-prev" aria-controls="slices" aria-label="Earlier slices" disabled>‹</button>
+      <div class="slices" id="slices" role="group" aria-label="Slice layers" aria-describedby="slice-hint" tabindex="0"></div>
+      <button type="button" class="slice-nav" id="slice-next" aria-controls="slices" aria-label="Later slices" disabled>›</button>
     </div>
-    <div class="slices" id="slices" role="group" aria-label="Slice layers"></div>
   </section>
   <main>
     <div class="stage">
@@ -419,6 +549,167 @@
     const selected = new Set();
     let latest = null;
     let seenDay = undefined;
+    let sliceFollowKey = "";
+    let sliceBoardSig = "";
+    let slicePointer = false;
+
+    const SLICE_STATES = {
+      done: "done",
+      active: "active",
+      review: "review",
+      missed: "missed",
+      skipped: "skipped",
+      upcoming: "upcoming",
+    };
+
+    function artistInitial(slice) {
+      const id = slice.agent_id;
+      if (id === "claude") return "C";
+      if (id === "grok-artist") return "G";
+      if (id === "openai") return "O";
+      const name = String(slice.display_name || "").trim();
+      return (name.charAt(0) || "?").toUpperCase();
+    }
+
+    function artistLabel(slice) {
+      if (slice.agent_id === "grok-artist") return "Grok";
+      const name = String(slice.display_name || "").trim();
+      return name || artistInitial(slice);
+    }
+
+    function artistClass(slice) {
+      const id = String(slice.agent_id || "").toLowerCase().replace(/[^a-z0-9-]/g, "");
+      return id ? " artist-" + id : "";
+    }
+
+    function anchorIndex(slices) {
+      let active = null;
+      let latestIndex = null;
+      for (const slice of slices) {
+        if (slice.state === "active" || slice.state === "review") active = slice.index;
+        if (slice.state !== "upcoming") latestIndex = slice.index;
+      }
+      if (active !== null) return active;
+      if (latestIndex !== null) return latestIndex;
+      return slices.length ? slices[0].index : null;
+    }
+
+    function reducedMotion() {
+      return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    }
+
+    function chipOffset(root, chip) {
+      const rootBox = root.getBoundingClientRect();
+      const chipBox = chip.getBoundingClientRect();
+      return chipBox.left - rootBox.left + root.scrollLeft;
+    }
+
+    function revealSlice(root, index, behavior) {
+      const chips = [...root.querySelectorAll("button.slice")];
+      const chip = chips.find((item) => item.dataset.index === String(index));
+      if (!chip) return;
+      const view = root.clientWidth;
+      const max = Math.max(0, root.scrollWidth - view);
+      const anchorLeft = chipOffset(root, chip);
+      const anchorRight = anchorLeft + chip.offsetWidth;
+      const ideal = Math.max(0, Math.min(max, anchorLeft - Math.max(0, (view - chip.offsetWidth) / 2)));
+      const packEnd = chip === chips[chips.length - 1];
+      let best = null;
+      for (const item of chips) {
+        const start = chipOffset(root, item);
+        if (start > max + 0.5) continue;
+        if (anchorRight > start + view + 1) continue;
+        if (start > anchorLeft + 1) break;
+        if (best === null) best = start;
+        else if (packEnd) best = Math.min(best, start);
+        else if (Math.abs(start - ideal) < Math.abs(best - ideal)) best = start;
+      }
+      const left = best === null ? ideal : Math.max(0, Math.min(max, best));
+      if (behavior === "smooth" && !reducedMotion()) root.scrollTo({ left: left, behavior: "smooth" });
+      else root.scrollLeft = left;
+    }
+
+    function fitStrip(root) {
+      if (!root) return;
+      const chip = root.querySelector("button.slice");
+      const previous = root.style.paddingRight;
+      root.style.paddingRight = "";
+      let next = "";
+      if (chip && root.scrollWidth > root.clientWidth + 1) next = (chip.offsetWidth + 16) + "px";
+      root.style.paddingRight = previous === next ? previous : next;
+    }
+
+    function stripEdges(root) {
+      const chips = [...root.querySelectorAll("button.slice")];
+      if (!chips.length) return { atStart: true, atEnd: true };
+      const rootBox = root.getBoundingClientRect();
+      const first = chips[0].getBoundingClientRect();
+      const last = chips[chips.length - 1].getBoundingClientRect();
+      return {
+        atStart: first.left >= rootBox.left - 1,
+        atEnd: last.right <= rootBox.right + 1,
+      };
+    }
+
+    function clampStrip(root) {
+      const last = root.querySelector("button.slice:last-child");
+      if (!last) return;
+      const limit = Math.max(0, chipOffset(root, last));
+      if (root.scrollLeft > limit + 1) root.scrollLeft = limit;
+    }
+
+    function updateSliceNav() {
+      const root = document.getElementById("slices");
+      const prev = document.getElementById("slice-prev");
+      const next = document.getElementById("slice-next");
+      if (!root || !prev || !next) return;
+      const edges = stripEdges(root);
+      prev.disabled = edges.atStart;
+      next.disabled = edges.atEnd;
+    }
+
+    function scrollToChipStart(root, index, behavior) {
+      const chip = root.querySelector('button.slice[data-index="' + index + '"]');
+      if (!chip) return;
+      const max = Math.max(0, root.scrollWidth - root.clientWidth);
+      const left = Math.max(0, Math.min(max, chipOffset(root, chip)));
+      if (behavior === "smooth" && !reducedMotion()) root.scrollTo({ left: left, behavior: "smooth" });
+      else root.scrollLeft = left;
+    }
+
+    function pageSlices(direction) {
+      const root = document.getElementById("slices");
+      const chips = [...root.querySelectorAll("button.slice")];
+      if (!root || !chips.length) return;
+      const rootBox = root.getBoundingClientRect();
+      let first = 0;
+      for (let i = 0; i < chips.length; i++) {
+        const box = chips[i].getBoundingClientRect();
+        if (box.right > rootBox.left + 12) { first = i; break; }
+      }
+      const approx = chips[0].offsetWidth + 8;
+      const step = Math.max(1, Math.round(root.clientWidth / approx));
+      const index = Math.max(0, Math.min(chips.length - 1, first + direction * step));
+      scrollToChipStart(root, chips[index].dataset.index, "smooth");
+    }
+
+    function snapStrip(root) {
+      if (!root || slicePointer) return;
+      const chips = [...root.querySelectorAll("button.slice")];
+      if (chips.length < 2) return;
+      const max = Math.max(0, root.scrollWidth - root.clientWidth);
+      let best = 0;
+      let bestDist = Math.abs(root.scrollLeft);
+      for (const chip of chips) {
+        const start = chipOffset(root, chip);
+        if (start > max + 0.5) break;
+        const dist = Math.abs(start - root.scrollLeft);
+        if (dist < bestDist) { best = start; bestDist = dist; }
+      }
+      if (bestDist > 2) {
+        root.scrollTo({ left: best, behavior: reducedMotion() ? "auto" : "smooth" });
+      }
+    }
 
     function chosenSlices(data) {
       return (data.slices || []).filter((slice) => selected.has(slice.index));
@@ -458,26 +749,78 @@
 
     function paintBoard(data) {
       const root = document.getElementById("slices");
-      const scroll = root.scrollLeft;
       const slices = data.slices || [];
       const valid = new Set(slices.map((slice) => slice.index));
       for (const index of [...selected]) {
         if (!valid.has(index)) selected.delete(index);
       }
-      root.innerHTML = slices.map((slice) => {
+      const anchor = anchorIndex(slices);
+      const followKey = (data.day_id ?? "") + ":" + anchor;
+      const follow = followKey !== sliceFollowKey;
+      const focused = document.activeElement;
+      const focusedIndex = focused && root.contains(focused) && focused.dataset ? focused.dataset.index : null;
+      const interacting = slicePointer || root.contains(document.activeElement);
+      const tabOwner = focusedIndex != null
+        ? String(focusedIndex)
+        : (anchor !== null ? String(anchor) : (slices[0] ? String(slices[0].index) : ""));
+      const signature = slices.map((slice) => [
+        slice.index,
+        slice.state,
+        slice.starts,
+        slice.ends,
+        slice.round,
+        slice.agent_id,
+        slice.display_name,
+        selected.has(slice.index) ? 1 : 0,
+        String(slice.index) === tabOwner ? 1 : 0,
+      ].join(":")).join("|");
+      if (signature === sliceBoardSig && root.childElementCount === slices.length) {
+        if (follow && !interacting && anchor !== null) {
+          revealSlice(root, anchor, "auto");
+          sliceFollowKey = followKey;
+        }
+        syncSliceActions(data);
+        updateSliceNav();
+        return;
+      }
+      const scroll = root.scrollLeft;
+      sliceBoardSig = signature;
+      root.setAttribute("aria-label", slices.length ? "Slice layers, " + slices.length + " slices" : "Slice layers");
+      root.innerHTML = slices.map((slice, i) => {
         const on = selected.has(slice.index);
         const pressed = on ? "true" : "false";
         const layer = on ? "Showing" : "Add layer";
         const action = on ? "Showing this layer. Activate to hide it." : "Activate to show this layer.";
-        return `<button type="button" class="slice ${esc(slice.state)}${on ? " selected" : ""}" data-index="${esc(slice.index)}" aria-pressed="${pressed}" aria-label="${esc(slice.starts)} to ${esc(slice.ends)}, ${esc(slice.display_name)}, round ${esc(slice.round)}, ${esc(slice.state)}. ${action}">
+        const state = SLICE_STATES[slice.state] || "upcoming";
+        const roundBreak = i > 0 && slice.round !== slices[i - 1].round ? " round-break" : "";
+        const live = state === "active" || state === "review" ? " current" : "";
+        const tab = String(slice.index) === tabOwner ? "0" : "-1";
+        const tip = slice.starts + "–" + slice.ends + " · " + slice.display_name + " · round " + slice.round + " · " + state;
+        return `<button type="button" class="slice ${state}${on ? " selected" : ""}${roundBreak}${live}${artistClass(slice)}" data-index="${esc(slice.index)}" data-round="${esc(slice.round)}" tabindex="${tab}" aria-pressed="${pressed}" aria-label="${esc(slice.starts)} to ${esc(slice.ends)}, ${esc(slice.display_name)}, round ${esc(slice.round)}, ${esc(state)}. ${action}" title="${esc(tip)}">
+          <span class="top">
+            <span class="initial" aria-hidden="true">${esc(artistInitial(slice))}</span>
+            <span class="who">${esc(artistLabel(slice))}</span>
+            <span class="round">R${esc(slice.round)}</span>
+          </span>
           <span class="when">${esc(slice.starts)}–${esc(slice.ends)}</span>
-          <span class="who">${esc(slice.display_name)}</span>
-          <span class="meta"><i class="pip" aria-hidden="true"></i>R${esc(slice.round)} · ${esc(slice.state)}</span>
+          <span class="meta"><i class="pip" aria-hidden="true"></i>${esc(state)}</span>
           <span class="layer">${layer}</span>
         </button>`;
       }).join("");
-      root.scrollLeft = scroll;
+      fitStrip(root);
+      if (follow && !interacting && anchor !== null) {
+        revealSlice(root, anchor, "auto");
+        sliceFollowKey = followKey;
+      } else {
+        root.scrollLeft = scroll;
+        if (follow && !interacting) sliceFollowKey = followKey;
+      }
+      if (focusedIndex != null) {
+        const again = root.querySelector('button.slice[data-index="' + focusedIndex + '"]');
+        if (again) again.focus({ preventScroll: true });
+      }
       syncSliceActions(data);
+      updateSliceNav();
     }
 
     function syncSliceActions(data) {
@@ -659,6 +1002,48 @@
       if (!latest) return;
       selected.clear();
       refreshSliceView();
+    });
+
+    document.getElementById("slice-prev").addEventListener("click", () => pageSlices(-1));
+    document.getElementById("slice-next").addEventListener("click", () => pageSlices(1));
+
+    const sliceStrip = document.getElementById("slices");
+    sliceStrip.addEventListener("pointerdown", () => { slicePointer = true; });
+    window.addEventListener("pointerup", () => { slicePointer = false; });
+    window.addEventListener("pointercancel", () => { slicePointer = false; });
+    sliceStrip.addEventListener("scroll", () => {
+      clampStrip(sliceStrip);
+      updateSliceNav();
+    }, { passive: true });
+    sliceStrip.addEventListener("scrollend", () => snapStrip(sliceStrip));
+    window.addEventListener("resize", () => {
+      fitStrip(sliceStrip);
+      updateSliceNav();
+    });
+    sliceStrip.addEventListener("wheel", (event) => {
+      const max = sliceStrip.scrollWidth - sliceStrip.clientWidth;
+      if (max <= 1) return;
+      if (Math.abs(event.deltaX) >= Math.abs(event.deltaY)) return;
+      event.preventDefault();
+      sliceStrip.scrollLeft += event.deltaY;
+    }, { passive: false });
+    sliceStrip.addEventListener("keydown", (event) => {
+      const chips = [...sliceStrip.querySelectorAll("button.slice")];
+      if (!chips.length) return;
+      const horizontal = event.key === "ArrowRight" || event.key === "ArrowLeft";
+      if (!horizontal && event.key !== "Home" && event.key !== "End") return;
+      const onChip = event.target.closest("button.slice");
+      if (!onChip && event.target !== sliceStrip) return;
+      event.preventDefault();
+      const current = chips.indexOf(onChip);
+      let next = 0;
+      if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = chips.length - 1;
+      else if (event.key === "ArrowRight") next = current === -1 ? 0 : Math.min(chips.length - 1, current + 1);
+      else next = current === -1 ? chips.length - 1 : Math.max(0, current - 1);
+      chips.forEach((chip, i) => { chip.tabIndex = i === next ? 0 : -1; });
+      chips[next].focus({ preventScroll: true });
+      revealSlice(sliceStrip, chips[next].dataset.index, "smooth");
     });
 
     load();
