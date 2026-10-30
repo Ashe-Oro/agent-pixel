@@ -55,6 +55,7 @@ from app.schedule import (
     lock_label,
     RedoWindow,
     note_gate_seconds,
+    redo_overfill,
     redo_seconds,
     resolve_slice_count,
     ny_date,
@@ -364,7 +365,8 @@ class Store:
               state TEXT NOT NULL DEFAULT 'active',
               veto_reason TEXT,
               vetoed_at INTEGER,
-              redo_seconds INTEGER
+              redo_seconds INTEGER,
+              revert_reason TEXT
             );
             CREATE TABLE IF NOT EXISTS chat (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -581,6 +583,7 @@ class Store:
                 ("veto_reason", "ALTER TABLE actions ADD COLUMN veto_reason TEXT"),
                 ("vetoed_at", "ALTER TABLE actions ADD COLUMN vetoed_at INTEGER"),
                 ("redo_seconds", "ALTER TABLE actions ADD COLUMN redo_seconds INTEGER"),
+                ("revert_reason", "ALTER TABLE actions ADD COLUMN revert_reason TEXT"),
             ):
                 if name in cols:
                     continue
@@ -643,7 +646,8 @@ class Store:
                   state TEXT NOT NULL DEFAULT 'active',
                   veto_reason TEXT,
                   vetoed_at INTEGER,
-                  redo_seconds INTEGER
+                  redo_seconds INTEGER,
+                  revert_reason TEXT
                 )
                 """
             )
@@ -1451,7 +1455,7 @@ class Store:
             "ny_date": day["ny_date"],
             "theme": day["theme"],
             "brief": day["brief"] if designed else None,
-            "director_note": self._visible_note(day["id"], note_slice) if designed else None,
+            "director_note": self._redo_turn_note(day, note_slice, now) if designed else None,
             "palette": json.loads(day["palette_json"]) if day["palette_json"] else [],
             "slice_index": clock.index,
             "pending_slice": pending,
@@ -1616,6 +1620,8 @@ class Store:
                 charged = 0
                 pixels_out: list[dict[str, int]] = []
                 done = False
+                outcome = "active"
+                revert_reason = None
                 if action == "paint":
                     raw = _parse_pixels(payload.get("pixels"))
                     palette_ids = {swatch["id"] for swatch in json.loads(day["palette_json"])}
@@ -1627,20 +1633,28 @@ class Store:
                     collapsed = _collapse(raw)
                     charged = len(collapsed)
                     focus = _parse_focus(payload.get("focus"))
-                    canvas = bytearray(bytes(day["canvas"]))
-                    for x, y, color in collapsed:
-                        canvas[y * GRID + x] = color
-                        pixels_out.append({"x": x, "y": y, "color": color})
-                    focus_map = json.loads(day["focus_json"]) if day["focus_json"] else {}
-                    if focus is not None:
-                        focus_map[agent_id] = focus
-                    self.conn.execute(
-                        "UPDATE days SET canvas = ?, focus_json = ? WHERE id = ?",
-                        (bytes(canvas), json.dumps(focus_map), day["id"]),
-                    )
-                    if self._session_clock(day, now).slices[index].redo:
+                    redo = self._session_clock(day, now).slices[index].redo
+                    if redo:
+                        revert_reason = redo_overfill(bytes(day["canvas"]), collapsed)
+                    if revert_reason:
+                        outcome = "reverted"
+                        pixels_out = [{"x": x, "y": y, "color": color} for x, y, color in collapsed]
                         self._bump_canvas_rev(day["id"])
-                    self._add_pixels(day["id"], agent_id, charged)
+                    else:
+                        canvas = bytearray(bytes(day["canvas"]))
+                        for x, y, color in collapsed:
+                            canvas[y * GRID + x] = color
+                            pixels_out.append({"x": x, "y": y, "color": color})
+                        focus_map = json.loads(day["focus_json"]) if day["focus_json"] else {}
+                        if focus is not None:
+                            focus_map[agent_id] = focus
+                        self.conn.execute(
+                            "UPDATE days SET canvas = ?, focus_json = ? WHERE id = ?",
+                            (bytes(canvas), json.dumps(focus_map), day["id"]),
+                        )
+                        if redo:
+                            self._bump_canvas_rev(day["id"])
+                        self._add_pixels(day["id"], agent_id, charged)
                 else:
                     done = bool(payload.get("done", False))
                     if payload.get("done") not in (None, True, False):
@@ -1652,8 +1666,9 @@ class Store:
                         """
                         INSERT INTO actions (
                           day_id, agent_id, slice_index, round_index, action, done,
-                          pixel_count, note, focus_json, pixels_json, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                          pixel_count, note, focus_json, pixels_json, created_at,
+                          state, revert_reason
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             day["id"],
@@ -1667,6 +1682,8 @@ class Store:
                             json.dumps(focus) if focus else None,
                             json.dumps(pixels_out),
                             int(now.timestamp()),
+                            outcome,
+                            revert_reason,
                         ),
                     )
                 except sqlite3.IntegrityError as exc:
@@ -1677,12 +1694,15 @@ class Store:
                 saved["index"] = index
                 saved["charged"] = charged
                 saved["done"] = done
+                saved["revert_reason"] = revert_reason
             except Exception:
                 self.conn.rollback()
                 raise
 
         self._run_write(mutate)
         self._dispatch_quietly()
+        if saved.get("revert_reason"):
+            raise ApiError(422, "overfill_reverted", saved["revert_reason"])
         fresh = self.day_by_id(saved["day_id"])
         return {
             "ok": True,
@@ -1843,16 +1863,17 @@ class Store:
             clock = self._session_clock(day, now)
             if clock.phase == "holding" and clock.holding_index is not None:
                 note_slice = clock.holding_index
-        director_note = self._visible_note(day["id"], note_slice) if day else None
+        director_note = self._redo_turn_note(day, note_slice, now) if day else None
         redo = False
         veto_note = None
         if day is not None and phase == "during" and index is not None:
             live = self._session_clock(day, now)
             if live.slices[index].redo:
                 redo = True
-                owner = artist_on_slice(order, index)
-                if agent_id == owner:
-                    veto_note = self._veto_note(day["id"], index)
+                brief = self._veto_brief(day["id"], index)
+                if brief and artist_on_slice(order, index) == agent_id:
+                    director_note = brief
+                    veto_note = brief
         return {
             "mural_id": f"day-{day['day_index']}" if day else None,
             "day_id": day["id"] if day else None,
@@ -1980,9 +2001,9 @@ class Store:
         note = None
         veto_note = None
         if day["theme"] and clock.phase == "during" and clock.index is not None:
-            note = self._visible_note(int(day["id"]), clock.index)
+            note = self._redo_turn_note(day, clock.index, now)
             if clock.slices[clock.index].redo:
-                veto_note = self._veto_note(int(day["id"]), clock.index)
+                veto_note = self._veto_brief(int(day["id"]), clock.index)
         return plan_wakes(
             day_id=int(day["id"]),
             theme=bool(day["theme"]),
@@ -2590,6 +2611,7 @@ class Store:
                     "pixel_count": row["pixel_count"],
                     "note": row["note"],
                     "state": row["state"] if "state" in row.keys() and row["state"] else "active",
+                    "revert_reason": row["revert_reason"] if "revert_reason" in row.keys() else None,
                     "pixels": json.loads(row["pixels_json"]) if row["pixels_json"] else [],
                     "created_at_unix": row["created_at"],
                 }
@@ -2660,7 +2682,7 @@ class Store:
             (day_id,),
         ).fetchall()
         for row in rows:
-            if _is_vetoed(row) or row["slice_index"] not in wanted or not row["pixels_json"]:
+            if _is_omitted(row) or row["slice_index"] not in wanted or not row["pixels_json"]:
                 continue
             for pixel in json.loads(row["pixels_json"]):
                 if not isinstance(pixel, dict):
@@ -2771,6 +2793,32 @@ class Store:
         reason = row["veto_reason"]
         return reason if isinstance(reason, str) and reason else None
 
+    def _veto_brief(self, day_id: int, index: int) -> str | None:
+        reason = self._veto_note(day_id, index)
+        if not reason:
+            return None
+        return "VETO: " + reason
+
+    def _redo_turn_note(self, day: sqlite3.Row | None, slice_index: int | None, now: datetime) -> str | None:
+        """Note a seat reads for this slice.
+
+        A live redo replaces it with ``VETO: `` plus the reason on the vetoed
+        action. ``_visible_note`` only sees ``director_notes``, so the reason
+        would otherwise never reach the redo.
+        """
+        if day is None:
+            return None
+        base = self._visible_note(int(day["id"]), slice_index)
+        if slice_index is None or not day["theme"]:
+            return base
+        clock = self._session_clock(day, now)
+        if clock.phase != "during" or clock.index != slice_index:
+            return base
+        if slice_index >= len(clock.slices) or not clock.slices[slice_index].redo:
+            return base
+        brief = self._veto_brief(int(day["id"]), slice_index)
+        return brief if brief else base
+
     def _bump_canvas_rev(self, day_id: int) -> None:
         self.conn.execute(
             "UPDATE days SET canvas_rev = COALESCE(canvas_rev, 0) + 1 WHERE id = ?",
@@ -2799,7 +2847,7 @@ class Store:
             "SELECT * FROM actions WHERE day_id = ? ORDER BY id ASC",
             (day["id"],),
         ).fetchall()
-        active = [row for row in rows if not _is_vetoed(row)]
+        active = [row for row in rows if not _is_omitted(row)]
         if _replay_actions(base, active) == stored:
             kept = [row for row in active if int(row["id"]) != action_id]
             return _replay_actions(base, kept)
@@ -2809,7 +2857,7 @@ class Store:
             if int(row["id"]) == action_id:
                 painted = [(pixel["x"], pixel["y"]) for pixel in _iter_pixels(row["pixels_json"])]
                 break
-            if _is_vetoed(row):
+            if _is_omitted(row):
                 continue
             for pixel in _iter_pixels(row["pixels_json"]):
                 prior[(pixel["x"], pixel["y"])] = pixel["color"]
@@ -2867,7 +2915,7 @@ class Store:
         rows = self.conn.execute(
             """
             SELECT * FROM actions
-            WHERE day_id = ? AND state != 'vetoed'
+            WHERE day_id = ? AND state NOT IN ('vetoed', 'reverted')
             ORDER BY id DESC LIMIT 6
             """,
             (day_id,),
@@ -2906,6 +2954,7 @@ class Store:
         clock = self._session_clock(day, now)
         actions: dict[int, sqlite3.Row] = {}
         vetoes: dict[int, sqlite3.Row] = {}
+        reverts: dict[int, sqlite3.Row] = {}
         for row in self.conn.execute(
             "SELECT * FROM actions WHERE day_id = ? ORDER BY id ASC",
             (day["id"],),
@@ -2913,6 +2962,8 @@ class Store:
             index = int(row["slice_index"])
             if _is_vetoed(row):
                 vetoes[index] = row
+            elif _is_reverted(row):
+                reverts[index] = row
             else:
                 actions[index] = row
         skip_from: dict[str, int] = {}
@@ -2928,6 +2979,8 @@ class Store:
             ended_early = skip_from.get(agent)
             if action is not None:
                 state = "done"
+            elif reverts.get(index) is not None:
+                state = "reverted"
             elif ended_early is not None and index > ended_early:
                 state = "skipped"
             elif miss_before is not None and index < miss_before:
@@ -2948,6 +3001,16 @@ class Store:
                         "state": "vetoed",
                         "action": vetoed["action"],
                         "pixel_count": vetoed["pixel_count"],
+                        "removed": True,
+                    }
+                )
+            reverted = reverts.get(index)
+            if reverted is not None:
+                history.append(
+                    {
+                        "state": "reverted",
+                        "action": reverted["action"],
+                        "pixel_count": reverted["pixel_count"],
                         "removed": True,
                     }
                 )
@@ -3140,6 +3203,17 @@ def _is_vetoed(row: sqlite3.Row) -> bool:
     if "state" not in row.keys():
         return False
     return row["state"] == "vetoed"
+
+
+def _is_reverted(row: sqlite3.Row) -> bool:
+    if "state" not in row.keys():
+        return False
+    return row["state"] == "reverted"
+
+
+def _is_omitted(row: sqlite3.Row) -> bool:
+    """Vetoed and reverted strokes stay in the ledger and off the canvas."""
+    return _is_vetoed(row) or _is_reverted(row)
 
 
 def _canvas_rev(day: sqlite3.Row | None) -> int:
