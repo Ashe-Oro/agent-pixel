@@ -247,9 +247,24 @@
     .slice.artist-claude { border-top-color: #e7c07a; }
     .slice.artist-grok-artist { border-top-color: #ff7a3c; }
     .slice.artist-openai { border-top-color: #9ab6ff; }
+    .slice.artist-ross { border-top-color: #c084fc; }
     .slice.artist-claude .initial { background: #e7c07a; }
     .slice.artist-grok-artist .initial { background: #ff7a3c; }
     .slice.artist-openai .initial { background: #9ab6ff; }
+    .slice.artist-ross .initial { background: #c084fc; }
+    .slices.dense { gap: 4px; }
+    .slices.dense .slice,
+    .slices.dense button.slice {
+      width: 64px;
+      padding: 4px 5px 5px;
+      scroll-snap-align: start;
+    }
+    .slices.dense .slice .who { font-size: 12px; }
+    .slices.dense .slice .round,
+    .slices.dense .slice .layer { display: none; }
+    .slices.dense .slice .meta { font-size: 10px; margin-top: 2px; }
+    .slices.dense .slice.round-break { margin-left: 0; }
+    .slices.dense .slice.round-break::before { display: none; }
     .slice-hint {
       margin: 0 0 8px;
       max-width: 78ch;
@@ -454,6 +469,7 @@
       main { grid-template-columns: 1fr; }
       img.mascot { width: 56px; }
       .slice, button.slice { width: 120px; }
+      .slices.dense .slice, .slices.dense button.slice { width: 56px; }
       button.slice-nav { width: 32px; min-height: 0; }
     }
     @media (prefers-reduced-motion: reduce) {
@@ -468,7 +484,7 @@
       <div>
         <p class="eyebrow">Daily pixel mural</p>
         <h1>Agent Pixel</h1>
-        <p class="lede" id="lede">Three artists share one brush. A new 256×256 canvas opens at 8:00 ET. Each slice is 3 minutes, and the morning locks after at most 54 minutes.</p>
+        <p class="lede" id="lede">Ross paints each new canvas alone. A new 256×256 canvas opens at 8:00 ET. Each turn is 3 minutes, and the canvas locks after at most 90 minutes.</p>
       </div>
     </div>
     <div class="clock" id="clock">
@@ -504,7 +520,7 @@
     </div>
     <aside id="panel">
       <h2>Waiting for the design</h2>
-      <p class="brief">The art director publishes a theme and 16 colors. Then Claude, Grok Artist, and OpenAI each take six 3-minute turns.</p>
+      <p class="brief">Ross publishes a theme and 16 colors, then paints the canvas himself, one turn at a time.</p>
     </aside>
   </main>
   <section class="chatter">
@@ -522,8 +538,8 @@
     <div class="archive-row" id="archive"></div>
   </section>
   <footer>
-    Fake art, no wallets. The server opens the morning canvas at 8:00 ET.
-    The art director sets the theme. This server enforces the slices.
+    Fake art, no wallets. Ross paints each new canvas. Earlier canvases keep the artists who made them.
+    The server opens the morning canvas at 8:00 ET.
   </footer>
   <script>
     const params = new URLSearchParams(location.search);
@@ -553,6 +569,7 @@
     let sliceBoardSig = "";
     let slicePointer = false;
 
+    const COMPACT_AFTER = 24;
     const SLICE_STATES = {
       done: "done",
       active: "active",
@@ -765,6 +782,7 @@
       const tabOwner = focusedIndex != null
         ? String(focusedIndex)
         : (anchor !== null ? String(anchor) : (slices[0] ? String(slices[0].index) : ""));
+      root.classList.toggle("dense", slices.length > COMPACT_AFTER);
       const signature = slices.map((slice) => [
         slice.index,
         slice.state,
@@ -806,15 +824,22 @@
             ? "Vetoed attempt removed from the canvas."
             : (on ? "Showing this layer. Activate to hide it." : "Activate to show this layer.");
         const stateText = vetoedAttempt ? state + " · vetoed" : state;
-        const roundBreak = i > 0 && slice.round !== slices[i - 1].round ? " round-break" : "";
+        const soloChip = !!data.solo;
+        const roundBreak = !soloChip && i > 0 && slice.round !== slices[i - 1].round ? " round-break" : "";
         const live = state === "active" || state === "review" ? " current" : "";
         const tab = String(slice.index) === tabOwner ? "0" : "-1";
-        const tip = slice.starts + "–" + slice.ends + " · " + slice.display_name + " · round " + slice.round + " · " + stateText;
-        return `<button type="button" class="slice ${state}${vetoedAttempt ? " vetoed" : ""}${on ? " selected" : ""}${roundBreak}${live}${artistClass(slice)}" data-index="${esc(slice.index)}" data-round="${esc(slice.round)}" tabindex="${tab}" aria-pressed="${pressed}" aria-label="${esc(slice.starts)} to ${esc(slice.ends)}, ${esc(slice.display_name)}, round ${esc(slice.round)}, ${esc(stateText)}. ${action}" title="${esc(tip)}">
+        const turnNo = slice.turn || (slice.index + 1);
+        const who = soloChip ? String(turnNo) : artistLabel(slice);
+        const roundBadge = soloChip ? String(turnNo) : ("R" + slice.round);
+        const roleLabel = soloChip
+          ? ("turn " + turnNo + " of " + (data.turns || slices.length) + ", " + slice.display_name)
+          : (slice.display_name + ", round " + slice.round);
+        const tip = slice.starts + "–" + slice.ends + " · " + roleLabel + " · " + stateText;
+        return `<button type="button" class="slice ${state}${vetoedAttempt ? " vetoed" : ""}${on ? " selected" : ""}${roundBreak}${live}${artistClass(slice)}" data-index="${esc(slice.index)}" data-round="${esc(slice.round)}" tabindex="${tab}" aria-pressed="${pressed}" aria-label="${esc(slice.starts)} to ${esc(slice.ends)}, ${esc(roleLabel)}, ${esc(stateText)}. ${action}" title="${esc(tip)}">
           <span class="top">
             <span class="initial" aria-hidden="true">${esc(artistInitial(slice))}</span>
-            <span class="who">${esc(artistLabel(slice))}</span>
-            <span class="round">R${esc(slice.round)}</span>
+            <span class="who">${esc(who)}</span>
+            <span class="round">${esc(roundBadge)}</span>
           </span>
           <span class="meta"><i class="pip" aria-hidden="true"></i>${esc(stateText)}</span>
           <span class="layer${state === "reverted" || slice.removed ? " removed" : ""}">${layer}</span>
@@ -905,7 +930,7 @@
         notes.push(`Viewing ${esc(data.theme || "a canvas")} (${esc(data.ny_date)}). <a href="/">Back to the latest canvas</a>.`);
       }
       if (data.demo_seed) {
-        notes.push("Demo cabin is baked into the opening canvas so the grid is visible. A paint in the open slice is not capped. A real 8:00 routine starts blank after design.");
+        notes.push("Demo cabin is baked into the opening canvas so the grid is visible. A real 8:00 routine starts blank after the design.");
       }
       if (notes.length) {
         banner.hidden = false;
@@ -925,17 +950,36 @@
       paintChat(data);
 
       const schedule = data.schedule || {};
+      const solo = !!data.solo;
       const lede = document.getElementById("lede");
+      const title = document.getElementById("schedule-title");
       if (lede && schedule.session_length) {
         const sliceMinutes = schedule.slice_minutes || 3;
-        lede.textContent = `Three artists share one brush. A new 256×256 canvas opens at 8:00 ET. Each slice is ${sliceMinutes} minutes, and the morning locks after at most ${schedule.session_length}.`;
+        if (solo) {
+          const turnBit = data.turn ? ` Turn ${data.turn} / ${data.turns}.` : "";
+          lede.textContent = `Ross paints this canvas alone.${turnBit} Each turn is ${sliceMinutes} minutes, and the canvas locks after at most ${schedule.session_length}.`;
+        } else if ((data.artists || []).length > 1) {
+          const names = data.artists.map((artist) => artist.display_name).join(", ");
+          lede.textContent = `${names} painted this canvas in ${schedule.slices} slices. Each slice is ${sliceMinutes} minutes.`;
+        }
+      }
+      if (title) {
+        if (solo && data.turn) title.textContent = `Turn ${data.turn} / ${data.turns}`;
+        else if (solo) title.textContent = "Ross";
+        else title.textContent = "This morning";
       }
       const active = (data.artists || []).find((artist) => artist.to_act);
       const panelBits = [];
       const roundTotal = schedule.rounds || "";
       panelBits.push(`<h2>${esc(data.theme || "No theme yet")}</h2>`);
       panelBits.push(`<p class="brief">${esc(data.message || "")}</p>`);
-      if (data.status === "painting" && data.current_display_name) {
+      if (solo && data.status === "painting" && data.turn) {
+        panelBits.push(`<p class="status-line">Ross holds the brush · turn ${esc(data.turn)} / ${esc(data.turns)}</p>`);
+      } else if (!solo && (data.artists || []).length > 1) {
+        const names = data.artists.map((artist) => artist.display_name).join(", ");
+        panelBits.push(`<p class="status-line">Painted by ${esc(names)}</p>`);
+      }
+      if (!solo && data.status === "painting" && data.current_display_name) {
         panelBits.push(`<p class="status-line">${esc(data.current_display_name)} holds the brush · round ${esc(data.round_index)} of ${esc(roundTotal)}</p>`);
       } else if (data.status === "locked") {
         panelBits.push(`<p class="status-line">Locked. The next morning starts blank.</p>`);
@@ -975,7 +1019,7 @@
       archive.innerHTML = days.length ? days.map((day) => `
         <a class="card" href="/canvas/${esc(day.day_id)}">
           ${day.preview_url ? `<img alt="${esc(day.theme || "Canvas")}, ${esc(day.ny_date)}" src="${esc(day.preview_url)}">` : `<span class="thumb"></span>`}
-          <span>${esc(day.ny_date)}<br>${esc(day.theme || "")}</span>
+          <span>${esc(day.ny_date)}<br>${esc(day.theme || "")}${day.painters && day.painters.length ? `<br>${esc(day.painters.join(" · "))}` : ""}</span>
         </a>
       `).join("") : "<p>Designed canvases stay in this gallery, newest first.</p>";
     }

@@ -20,7 +20,7 @@ def test_duplicate_collapse_charges_unique_cells_and_last_wins(client):
     day_id = opened["day_id"]
     response = client.post(
         "/agent/act",
-        headers=auth("claude"),
+        headers=auth("ross"),
         json={
             "type": "paint",
             "pixels": [
@@ -41,22 +41,22 @@ def test_duplicate_collapse_charges_unique_cells_and_last_wins(client):
     pin(client, "2026-10-28T08:06:00")
     repeated = [{"x": 3, "y": 3, "color": 2} for _ in range(64)]
     repeated[-1]["color"] = 5
-    response = client.post("/agent/act", headers=auth("claude"), json={"type": "paint", "pixels": repeated})
+    response = client.post("/agent/act", headers=auth("ross"), json={"type": "paint", "pixels": repeated})
     assert response.status_code == 200, response.text
     assert response.json()["charged"] == 1
     assert cells(client, day_id, 3, 3) == [5]
 
 
-def test_open_slice_has_no_pixel_cap_and_can_cover_the_grid(client):
+def test_open_slice_has_a_turn_budget_and_rejects_a_larger_paint(client):
     opened = open_design(client)
     day_id = opened["day_id"]
-    view = client.get("/agent/turn", headers=auth("claude")).json()
+    view = client.get("/agent/turn", headers=auth("ross")).json()
     assert view["to_act"] is True
-    assert view["pixels_remaining_turn"] is None
+    assert view["pixels_remaining_turn"] == 16384
     assert view["pixels_remaining_day"] is None
     state = client.get("/watch/state").json()
-    assert state["pixels_remaining_turn"] is None
-    assert state["schedule"]["pixels_per_turn"] is None
+    assert state["pixels_remaining_turn"] == 16384
+    assert state["schedule"]["pixels_per_turn"] == 16384
     assert state["schedule"]["pixels_per_artist_day"] is None
     assert state["artists"][0]["pixels_remaining_day"] is None
 
@@ -73,44 +73,35 @@ def test_open_slice_has_no_pixel_cap_and_can_cover_the_grid(client):
 
     # The old turn cap was 64 and the old day cap was 256. Both must stay open.
     wide = [{"x": index % 256, "y": index // 256, "color": 1} for index in range(300)]
-    first = client.post("/agent/act", headers=auth("claude"), json={"type": "paint", "pixels": wide})
+    first = client.post("/agent/act", headers=auth("ross"), json={"type": "paint", "pixels": wide})
     assert first.status_code == 200, first.text
     assert first.json()["charged"] == 300
     assert first.json()["pixels_remaining_day"] is None
     assert first.json()["pixels_remaining_turn"] == 0
-    again = client.post(
-        "/agent/act",
-        headers=auth("claude"),
-        json={"type": "paint", "pixels": [{"x": 0, "y": 2, "color": 1}]},
-    )
-    assert again.status_code == 409
-    assert again.json()["error"] == "slice_used"
-    assert cells(client, day_id, 0, 2) == [0]
+    # The paint ended the turn, so the next post is the following turn.
+    assert client.get("/watch/state").json()["turn"] == 2
 
-    # A later slice can still paint every cell, including ones already used today.
     pin(client, "2026-10-28T08:06:00")
-    later = client.get("/agent/turn", headers=auth("claude")).json()
+    later = client.get("/agent/turn", headers=auth("ross")).json()
     assert later["to_act"] is True
-    assert later["pixels_remaining_turn"] is None
+    assert later["pixels_remaining_turn"] == 16384
     assert later["pixels_remaining_day"] is None
-    full = [{"x": index % 256, "y": index // 256, "color": 4} for index in range(256 * 256)]
-    covered = client.post("/agent/act", headers=auth("claude"), json={"type": "paint", "pixels": full})
-    assert covered.status_code == 200, covered.text
-    assert covered.json()["charged"] == 256 * 256
-    assert cells(client, day_id, 0, 0) == [4]
-    assert cells(client, day_id, 255, 0) == [4]
-    assert cells(client, day_id, 43, 1) == [4]
-    assert cells(client, day_id, 0, 255) == [4]
-    assert cells(client, day_id, 255, 255) == [4]
-
-    grok = client.get("/agent/turn", headers=auth("grok-artist")).json()
-    assert grok["to_act"] is True
-    assert grok["pixels_remaining_turn"] is None
-    latest = grok["recent_strokes"][0]
-    assert latest["pixel_count"] == 256 * 256
+    too_big = [{"x": index % 256, "y": index // 256, "color": 4} for index in range(16385)]
+    rejected = client.post("/agent/act", headers=auth("ross"), json={"type": "paint", "pixels": too_big})
+    assert rejected.status_code == 400
+    assert rejected.json()["error"] == "over_budget"
+    assert cells(client, day_id, 0, 0) == [1]
+    covered = [{"x": index % 256, "y": 8 + index // 256, "color": 4} for index in range(600)]
+    painted = client.post("/agent/act", headers=auth("ross"), json={"type": "paint", "pixels": covered})
+    assert painted.status_code == 200, painted.text
+    assert painted.json()["charged"] == 600
+    ross = client.get("/agent/turn", headers=auth("ross")).json()
+    assert ross["to_act"] is True
+    latest = ross["recent_strokes"][0]
+    assert latest["pixel_count"] == 600
     assert latest["pixels_omitted"] is True
     assert "pixels" not in latest
-    _assert_no_full_grid(grok)
+    _assert_no_full_grid(ross)
 
 
 def test_legacy_budget_columns_do_not_cap_a_new_process(tmp_path):
@@ -143,11 +134,11 @@ def test_legacy_budget_columns_do_not_cap_a_new_process(tmp_path):
         ).fetchone()
         assert stored["pixels_per_turn"] == 0
         assert stored["pixels_per_artist_day"] == 0
-        view = client.get("/agent/turn", headers=auth("claude")).json()
-        assert view["pixels_remaining_turn"] is None
+        view = client.get("/agent/turn", headers=auth("ross")).json()
+        assert view["pixels_remaining_turn"] == 16384
         assert view["pixels_remaining_day"] is None
         batch = [{"x": index, "y": 4, "color": 2} for index in range(90)]
-        painted = client.post("/agent/act", headers=auth("claude"), json={"type": "paint", "pixels": batch})
+        painted = client.post("/agent/act", headers=auth("ross"), json={"type": "paint", "pixels": batch})
         assert painted.status_code == 200, painted.text
         assert painted.json()["charged"] == 90
     reopened.state.store.close()
@@ -158,7 +149,7 @@ def test_out_of_bounds_and_bad_color_are_atomic(client):
     day_id = opened["day_id"]
     response = client.post(
         "/agent/act",
-        headers=auth("claude"),
+        headers=auth("ross"),
         json={"type": "paint", "pixels": [{"x": 1, "y": 1, "color": 1}, {"x": 256, "y": 0, "color": 1}]},
     )
     assert response.status_code == 400
@@ -166,21 +157,21 @@ def test_out_of_bounds_and_bad_color_are_atomic(client):
     assert cells(client, day_id, 1, 1) == [0]
     response = client.post(
         "/agent/act",
-        headers=auth("claude"),
+        headers=auth("ross"),
         json={"type": "paint", "pixels": [{"x": 1, "y": 1, "color": 99}]},
     )
     assert response.status_code == 400
     assert response.json()["error"] == "bad_color"
     response = client.post(
         "/agent/act",
-        headers=auth("claude"),
+        headers=auth("ross"),
         json={"type": "paint", "pixels": [{"x": 4, "y": 4, "color": 3}], "note": "x" * 121},
     )
     assert response.status_code == 400
     assert response.json()["error"] == "bad_note"
     response = client.post(
         "/agent/act",
-        headers=auth("claude"),
+        headers=auth("ross"),
         json={"type": "paint", "pixels": [{"x": 4, "y": 4, "color": 3}], "note": "kept"},
     )
     assert response.status_code == 200, response.text
@@ -208,14 +199,14 @@ def test_preview_png_is_nearest_neighbor(client):
     # The fixture palette's id 1 is not guaranteed red, so compare against the rendered swatch.
     client.post(
         "/agent/act",
-        headers=auth("claude"),
+        headers=auth("ross"),
         json={
             "type": "paint",
             "pixels": [{"x": 2, "y": 3, "color": 1}],
             "focus": {"x": 0, "y": 0, "w": 8, "h": 8},
         },
     )
-    view = client.get("/agent/turn", headers=auth("claude"))
+    view = client.get("/agent/turn", headers=auth("ross"))
     # Slice is consumed, so this view is informational. Crop URL was stored for next time;
     # fetch the preview directly.
     preview = client.get(f"/watch/canvas.png?day_id={opened['day_id']}&scale=2")

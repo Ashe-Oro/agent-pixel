@@ -12,15 +12,15 @@ def test_skill_matches_contract(client):
     assert body == (ROOT / "skill.md").read_text(encoding="utf-8")
     assert "256×256" in body
     assert "08:00" in body
-    assert "08:54" in body
-    assert "08:36" not in body
-    assert "3-minute" in body
-    assert "grok-artist" in body
-    assert "6 turns/day" in body
-    assert "turns_remaining" in body and "of 6 today" in body
-    assert "round_index" in body and "1–6" in body
-    assert "18 slices" in body
-    assert "8 turns" not in body
+    assert "09:30" in body
+    assert "08:54" not in body
+    assert "3 minutes" in body
+    assert "Ross" in body
+    assert "16384" in body
+    assert "TILE_TURNS" in body
+    assert "POST /agent/finish" in body
+    assert "2×2" in body
+    assert "canvas_url" in body
 
 
 def test_watch_page_uses_crisp_pixels(client):
@@ -35,10 +35,13 @@ def test_watch_page_uses_crisp_pixels(client):
     assert 'id="slice-next"' in page
     assert "overflow-x: auto" in page
     assert "repeat(3, minmax(0, 1fr))" not in page
-    assert "54 minutes" in page
-    assert "36 minutes" not in page
+    assert "90 minutes" in page
+    assert "54 minutes" not in page
+    assert "Ross paints" in page
+    assert "turn ${esc(data.turn)} / ${esc(data.turns)}" in page
     assert "of ${esc(roundTotal)}" in page
     assert "of 4" not in page
+    assert "slices.dense" in page
     assert "256" in page
     assert 'data-canvas-outline="256"' in page
     assert "border: 1px solid #ffd36a" in page
@@ -85,17 +88,20 @@ def test_seeded_morning_is_paintable(tmp_path):
         assert state["status"] == "painting"
         assert state["demo_seed"] is True
         assert state["theme"] == "Cozy cabin in the woods"
-        assert state["current_agent_id"] == "claude"
+        assert state["solo"] is True
+        assert state["current_agent_id"] == "ross"
+        assert state["turn"] == 1
+        assert state["turns"] == 30
         assert len(state["palette"]) == 16
-        assert len(state["slices"]) == 18
-        assert state["schedule"]["rounds"] == 6
-        assert state["schedule"]["slices"] == 18
-        assert state["schedule"]["locks"] == "08:54"
-        assert state["schedule"]["turns_per_artist"] == 6
-        assert state["pixels_remaining_turn"] is None
-        assert state["schedule"]["pixels_per_turn"] is None
+        assert len(state["slices"]) == 30
+        assert state["schedule"]["slices"] == 30
+        assert state["schedule"]["locks"] == "09:30"
+        assert state["schedule"]["turns_per_artist"] == 30
+        assert state["pixels_remaining_turn"] == 16384
+        assert state["schedule"]["pixels_per_turn"] == 16384
         assert state["schedule"]["pixels_per_artist_day"] is None
         assert all(artist["pixels_remaining_day"] is None for artist in state["artists"])
+        assert [artist["agent_id"] for artist in state["artists"]] == ["ross"]
         region = client.get(
             f"/host/days/{state['day_id']}/region",
             params={"x": 100, "y": 136, "w": 1, "h": 1},

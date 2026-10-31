@@ -24,7 +24,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from app.schedule import SLICE_SECONDS, SliceMark, artist_on_slice
+from app.schedule import ARTISTS, SLICE_SECONDS, SliceMark, artist_on_slice
 
 ALLOWED_EVENTS = (
     "slice_open",
@@ -96,11 +96,17 @@ class WakeIntent:
     attempts: int = 0
 
 
-def _render_url(day_id: int, rev: int) -> str:
-    url = f"/watch/canvas.png?day_id={day_id}&scale=2"
+def _render_url(day_id: int, rev: int, scale: int = 2) -> str:
+    url = f"/watch/canvas.png?day_id={day_id}&scale={scale}"
     if rev:
         url += f"&v={rev}"
     return url
+
+
+def _absolute_url(base: str, path: str) -> str:
+    if base and path.startswith("/"):
+        return base + path
+    return path
 
 
 def public_base_url() -> str:
@@ -210,14 +216,20 @@ def plan_wakes(
     holding_index: int | None = None,
     veto_note: str | None = None,
     render_rev: int = 0,
+    solo: bool = False,
+    pixels_per_turn: int | None = None,
+    palette: list | None = None,
+    design_wait: int | None = None,
 ) -> list[WakeIntent]:
     """Wakes that are still in their delivery window.
 
     ``slice_open`` is only the seat that owns the live slice. Its body carries
-    the design brief and the latest director note for that artist.
-    ``slice_closed`` is the slice that just closed: during the review hold and
-    while the next slice is open (reviewers such as ross). After the session
-    locks, that review and ``canvas_locked`` stay eligible for one slice length.
+    the design brief and the latest director note for that artist. On a solo
+    canvas the painter is Ross, and his webhook is woken for each paint turn
+    even when ``slice_open`` is not in his event list. Claude, Grok Artist,
+    and OpenAI are not woken. ``slice_closed`` is the review ping between
+    roster slices; a solo canvas skips it. After the session locks,
+    ``canvas_locked`` stays eligible for one slice length.
     ``design_needed`` and ``awaiting_design`` are only while the canvas is open
     and has no theme. Neither of those bodies includes a brief.
     """
@@ -228,6 +240,16 @@ def plan_wakes(
         for event in hook.events:
             if event in by_event:
                 by_event[event].append(hook)
+    if solo:
+        painter = order[0] if order else "ross"
+        for event in list(by_event):
+            if event == "slice_closed":
+                by_event[event] = []
+                continue
+            by_event[event] = [hook for hook in by_event[event] if hook.seat_id not in ARTISTS]
+        for hook in hooks:
+            if hook.seat_id == painter and hook not in by_event["slice_open"]:
+                by_event["slice_open"].append(hook)
     intents: list[WakeIntent] = []
 
     def add(
@@ -252,11 +274,26 @@ def plan_wakes(
             if redo:
                 payload["redo"] = True
                 payload["veto_note"] = veto_note
+            if solo and slice_index >= 0:
+                payload["turn"] = slice_index + 1
+                payload["turns"] = len(slices)
+                payload["seconds_per_turn"] = SLICE_SECONDS
+                payload["pixels_per_turn"] = pixels_per_turn
+                payload["palette"] = palette or []
         elif event == "slice_closed" and slice_index >= 0:
             nxt = slice_index + 1
             payload["next_slice"] = nxt if slices and nxt < len(slices) else None
-        if event in ("slice_closed", "canvas_locked") or hook.seat_id == "ross":
-            payload["render_url"] = _render_url(day_id, render_rev)
+        elif event == "design_needed" and solo:
+            payload["design_wait_seconds"] = design_wait if design_wait is not None else 0
+            payload["turns"] = len(slices)
+            payload["seconds_per_turn"] = SLICE_SECONDS
+            payload["pixels_per_turn"] = pixels_per_turn
+        if event in ("slice_closed", "canvas_locked") or hook.seat_id == "ross" or (solo and event == "slice_open"):
+            path = _render_url(day_id, render_rev)
+            payload["render_url"] = path
+            if solo and event == "slice_open":
+                payload["preview_url"] = _render_url(day_id, render_rev, 3)
+                payload["canvas_url"] = _absolute_url(api_base_url, path)
         intents.append(
             WakeIntent(
                 day_id=day_id,

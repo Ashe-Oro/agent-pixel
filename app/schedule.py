@@ -1,14 +1,14 @@
 """Wall-clock schedule for an Agent Pixel morning.
 
-America/New_York. The session opens at 08:00. Three artists, each painting
-``tile_rounds()`` times (``TILE_ROUNDS``, default 6, so 18 slices). Each
-slice stays open for at most ``SLICE_SECONDS`` (default 180, three minutes)
-measured from when that slice opened. An on-time paint or pass closes the
-slice immediately and opens the next one. A slice with no action closes when
-its three minutes run out and is missed. With the default, eighteen timeouts
-end the morning 54 minutes after it opened (08:54 ET); early acts finish it
-sooner. A canvas stores its own slice count, so older 12-slice mornings keep
-that clock.
+America/New_York. The session opens at 08:00. A new canvas is painted by Ross
+alone for ``tile_turns()`` turns (``TILE_TURNS``, default 30). Each turn stays
+open for at most ``SLICE_SECONDS`` (default 180, three minutes) measured from
+when that turn opened. An on-time paint or pass closes the turn immediately
+and opens the next one. A turn with no action closes when its three minutes
+run out and is missed. With the default, thirty timeouts end the canvas 90
+minutes after painting started (09:30 ET if the design was in at 08:00);
+early acts finish it sooner. A canvas stores its own slice count and painter
+order, so older three-artist mornings keep that clock.
 """
 
 from __future__ import annotations
@@ -23,11 +23,18 @@ NY = ZoneInfo("America/New_York")
 OPEN_HOUR = 8
 # One place for the slice length. TILE_SLICE_SECONDS overrides it; 180 is 3 minutes.
 SLICE_SECONDS = int(os.environ.get("TILE_SLICE_SECONDS", "180"))
-# TILE_ROUNDS is read when a canvas is created. 1..24, default 6.
+# TILE_ROUNDS is the retired three-artist round count. New canvases use TILE_TURNS.
 DEFAULT_ROUNDS = 6
 MIN_ROUNDS = 1
 MAX_ROUNDS = 24
+# TILE_TURNS is read when a canvas is created. 1..90, default 30.
+DEFAULT_TURNS = 30
+MIN_TURNS = 1
+MAX_TURNS = 90
+# Unique cells Ross may place in one turn, including overwrites of his own pixels.
+DEFAULT_TURN_PIXELS = 16384
 ARTISTS = ("claude", "grok-artist", "openai")
+SOLO_PAINTER = "ross"
 # Canvases opened before TILE_ROUNDS existed ran four rounds, twelve slices.
 LEGACY_SLICE_COUNT = 4 * len(ARTISTS)
 DISPLAY = {
@@ -193,17 +200,18 @@ def redo_overfill(before: bytes, collapsed: list[tuple[int, int, int]]) -> str |
 def design_wait_seconds() -> int:
     """How long a new canvas waits for Ross's design. ``TILE_DESIGN_WAIT_SECONDS``.
 
-    Default 300 (five minutes). ``0`` applies the fallback design on the next check.
+    Default 900 (fifteen minutes), so he can study references before the
+    fallback palette. ``0`` applies the fallback design on the next check.
     """
-    return env_seconds("TILE_DESIGN_WAIT_SECONDS", 300)
+    return env_seconds("TILE_DESIGN_WAIT_SECONDS", 900)
 
 
 def tile_rounds() -> int:
-    """Rounds per artist for a canvas created now. ``TILE_ROUNDS``.
+    """Retired rounds-per-artist setting. ``TILE_ROUNDS``.
 
     Parsed like the other non-negative integer settings. Default 6.
     Blank, non-integer, negative, zero, or a value outside 1..24 uses 6.
-    Zero is not a round count: a morning with no slices cannot open.
+    New canvases do not use this. Older rows keep the slice count they stored.
     """
     value = env_seconds("TILE_ROUNDS", DEFAULT_ROUNDS)
     if value < MIN_ROUNDS or value > MAX_ROUNDS:
@@ -211,14 +219,55 @@ def tile_rounds() -> int:
     return value
 
 
+def tile_turns() -> int:
+    """Turns Ross gets on a canvas created now. ``TILE_TURNS``.
+
+    Default 30. Blank, non-integer, negative, zero, or a value outside 1..90
+    uses 30. Zero is not a turn count: a canvas with no turns cannot open.
+    """
+    value = env_seconds("TILE_TURNS", DEFAULT_TURNS)
+    if value < MIN_TURNS or value > MAX_TURNS:
+        return DEFAULT_TURNS
+    return value
+
+
+def turn_pixel_budget() -> int:
+    """Unique cells one Ross turn may place. ``TILE_PIXELS_PER_TURN``.
+
+    Default 16384, a quarter of the 256×256 grid, so one turn can lay a large
+    region or correct one. Blank, zero, or a value outside 1..65536 uses 16384.
+    Overwrites of cells he already painted count as cells in that stroke.
+    """
+    value = env_seconds("TILE_PIXELS_PER_TURN", DEFAULT_TURN_PIXELS)
+    if value < 1 or value > GRID * GRID:
+        return DEFAULT_TURN_PIXELS
+    return value
+
+
 def configured_slice_count() -> int:
-    """Slices on a canvas created with the current ``TILE_ROUNDS``."""
-    return tile_rounds() * len(ARTISTS)
+    """Turns stored on a canvas created now. ``TILE_TURNS``, default 30."""
+    return tile_turns()
 
 
 def max_slice_count() -> int:
-    """Largest slice count ``TILE_ROUNDS`` can store."""
-    return MAX_ROUNDS * len(ARTISTS)
+    """Largest slice count a canvas row can address.
+
+    Covers a retired 24-round three-artist morning and a solo canvas at
+    ``MAX_TURNS``.
+    """
+    return max(MAX_ROUNDS * len(ARTISTS), MAX_TURNS)
+
+
+def is_solo_order(order: list[str]) -> bool:
+    """True when one seat paints every slice. New canvases store ``["ross"]``."""
+    return len(order) == 1
+
+
+def seats_for(order: list[str] | None) -> int:
+    """How many painters share the slices. Solo is 1. A roster morning is 3."""
+    if order and is_solo_order(order):
+        return 1
+    return len(ARTISTS)
 
 
 def resolve_slice_count(slice_count: int | None) -> int:
@@ -230,11 +279,18 @@ def resolve_slice_count(slice_count: int | None) -> int:
     return slice_count
 
 
-def rounds_in(slice_count: int) -> int:
-    """Highest 1-based round number on a canvas with ``slice_count`` slices."""
+def rounds_in(slice_count: int, seats: int | None = None) -> int:
+    """Highest 1-based round number on a canvas with ``slice_count`` slices.
+
+    ``seats`` is 1 on a solo canvas, so each turn is its own round. The
+    retired roster uses three seats.
+    """
+    size = len(ARTISTS) if not seats else seats
+    if size < 1:
+        size = 1
     if slice_count < 1:
-        return tile_rounds()
-    return (slice_count - 1) // len(ARTISTS) + 1
+        return tile_turns() if size == 1 else tile_rounds()
+    return (slice_count - 1) // size + 1
 
 
 def session_minutes(slice_count: int | None = None) -> int:
@@ -260,8 +316,8 @@ def ny_date(now: datetime) -> str:
 def day_bounds(d: date, slice_count: int | None = None) -> tuple[datetime, datetime]:
     """08:00 ET through the latest possible lock, when every slice times out.
 
-    ``slice_count`` is that canvas's stored length. Omit it for a new morning
-    under the current ``TILE_ROUNDS``.
+    ``slice_count`` is that canvas's stored length. Omit it for a new canvas
+    under the current ``TILE_TURNS``.
     """
     start = datetime(d.year, d.month, d.day, OPEN_HOUR, 0, 0, tzinfo=NY)
     lock = start + timedelta(seconds=resolve_slice_count(slice_count) * SLICE_SECONDS)
@@ -523,13 +579,18 @@ def slice_index(now: datetime) -> int | None:
 
 
 def artist_on_slice(order: list[str], index: int) -> str:
+    if is_solo_order(order):
+        return order[0]
     if len(order) != len(ARTISTS):
         raise ValueError("roster must be the three artists")
     return order[index % len(order)]
 
 
-def round_on_slice(index: int) -> int:
-    return index // len(ARTISTS) + 1
+def round_on_slice(index: int, seats: int | None = None) -> int:
+    size = len(ARTISTS) if not seats else seats
+    if size < 1:
+        size = 1
+    return index // size + 1
 
 
 def rotate(order: list[str], day_index: int, enabled: bool) -> list[str]:

@@ -1,105 +1,87 @@
 from tests.conftest import auth, host, open_design, pin
 
 
-def test_off_slice_is_rejected_and_pass_opens_the_next_artist(client):
+def test_off_slice_is_rejected_and_pass_opens_the_next_turn(client):
     open_design(client, "2026-10-28T08:00:00")
+    ross = client.get("/agent/turn", headers=auth("ross")).json()
     claude = client.get("/agent/turn", headers=auth("claude")).json()
-    grok = client.get("/agent/turn", headers=auth("grok-artist")).json()
-    assert claude["to_act"] is True
-    assert claude["turns_remaining"] == 6
-    assert claude["round_index"] == 1
-    assert grok["to_act"] is False
+    assert ross["to_act"] is True
+    assert ross["turns_remaining"] == 30
+    assert ross["turn"] == 1
+    assert claude["to_act"] is False
     denied = client.post(
         "/agent/act",
-        headers=auth("grok-artist"),
+        headers=auth("claude"),
         json={"type": "paint", "pixels": [{"x": 0, "y": 0, "color": 1}]},
     )
-    assert denied.status_code == 409
-    assert denied.json()["error"] == "not_your_turn"
+    assert denied.status_code == 403
+    assert denied.json()["error"] == "wrong_role"
 
-    passed = client.post("/agent/act", headers=auth("claude"), json={"type": "pass", "note": "yield"})
+    passed = client.post("/agent/act", headers=auth("ross"), json={"type": "pass", "note": "yield"})
     assert passed.status_code == 200, passed.text
-    assert passed.json()["turns_remaining"] == 5
+    assert passed.json()["turns_remaining"] == 29
     assert passed.json()["to_act"] is False
-    # Passing closes this slice immediately. Grok's 3 minutes start now.
-    grok_now = client.get("/agent/turn", headers=auth("grok-artist")).json()
-    assert grok_now["to_act"] is True
-    assert grok_now["round_index"] == 1
-    assert grok_now["turns_remaining"] == 6
-    claude_later = client.get("/agent/turn", headers=auth("claude")).json()
-    assert claude_later["to_act"] is False
-    assert claude_later["turns_remaining"] == 5
+    nxt = client.get("/agent/turn", headers=auth("ross")).json()
+    assert nxt["to_act"] is True
+    assert nxt["slice_index"] == 1
+    assert nxt["turn"] == 2
+    assert nxt["turns_remaining"] == 29
 
 
 def test_pass_done_skips_remaining_rounds(client):
     open_design(client)
     response = client.post(
         "/agent/act",
-        headers=auth("claude"),
+        headers=auth("ross"),
         json={"type": "pass", "done": True, "note": "leaving the pines"},
     )
     assert response.status_code == 200, response.text
     assert response.json()["turns_remaining"] == 0
     skipped = client.post(
         "/agent/act",
-        headers=auth("claude"),
+        headers=auth("ross"),
         json={"type": "paint", "pixels": [{"x": 0, "y": 0, "color": 1}]},
     )
     assert skipped.status_code == 409
-    assert skipped.json()["error"] == "rounds_skipped"
+    assert skipped.json()["error"] == "morning_locked"
     state = client.get("/watch/state").json()
-    claude_slices = [item for item in state["slices"] if item["agent_id"] == "claude"]
-    assert [item["state"] for item in claude_slices] == ["done", "skipped", "skipped", "skipped", "skipped", "skipped"]
-    grok = client.get("/agent/turn", headers=auth("grok-artist")).json()
-    assert grok["to_act"] is True
-    assert grok["round_index"] == 1
+    assert state["status"] == "locked"
+    assert state["slices"][0]["state"] == "done"
+    assert all(item["state"] == "skipped" for item in state["slices"][1:])
 
 
 def test_missed_slice_does_not_block_a_later_slice(client):
-    """Missing slice k must not refuse slice k+3. Turn and act agree."""
+    """A missed turn does not cancel the turns that follow it."""
     open_design(client, "2026-10-28T08:00:00")
     pin(client, "2026-10-28T08:06:00")
-    missed_turn = client.get("/agent/turn", headers=auth("grok-artist")).json()
-    assert missed_turn["to_act"] is False
-    assert missed_turn["slice_index"] == 2
     missed_board = client.get("/watch/state").json()["slices"]
-    assert missed_board[1]["agent_id"] == "grok-artist"
+    assert missed_board[0]["state"] == "missed"
     assert missed_board[1]["state"] == "missed"
-    missed_act = client.post("/agent/act", headers=auth("grok-artist"), json={"type": "pass"})
-    assert missed_act.status_code == 409
-    assert missed_act.json()["error"] == "slice_missed"
-
-    pin(client, "2026-10-28T08:12:00")
-    later_turn = client.get("/agent/turn", headers=auth("grok-artist")).json()
+    assert missed_board[2]["state"] == "active"
+    later_turn = client.get("/agent/turn", headers=auth("ross")).json()
     assert later_turn["to_act"] is True
-    assert later_turn["slice_index"] == 4
+    assert later_turn["slice_index"] == 2
     later_act = client.post(
         "/agent/act",
-        headers=auth("grok-artist"),
-        json={"type": "paint", "pixels": [{"x": 4, "y": 5, "color": 2}], "note": "back on a later slice"},
+        headers=auth("ross"),
+        json={"type": "paint", "pixels": [{"x": 4, "y": 5, "color": 2}], "note": "back on a later turn"},
     )
     assert later_act.status_code == 200, later_act.text
-    assert later_act.json()["slice_index"] == 4
-    assert later_act.json()["to_act"] is False
+    assert later_act.json()["slice_index"] == 2
     state = client.get("/watch/state").json()
-    grok = next(item for item in state["artists"] if item["agent_id"] == "grok-artist")
-    assert grok["to_act"] is False
-    assert state["slice_index"] == 5
+    assert state["current_agent_id"] == "ross"
+    assert state["slice_index"] == 3
 
 
 def test_missed_slice_does_not_roll_the_turn_forward(client):
     open_design(client, "2026-10-28T08:00:00")
     pin(client, "2026-10-28T08:03:00")
-    claude = client.get("/agent/turn", headers=auth("claude")).json()
-    assert claude["to_act"] is False
-    assert claude["turns_remaining"] == 5
-    late = client.post(
-        "/agent/act",
-        headers=auth("claude"),
-        json={"type": "paint", "pixels": [{"x": 0, "y": 0, "color": 1}]},
-    )
-    assert late.status_code == 409
-    assert late.json()["error"] == "slice_missed"
+    ross = client.get("/agent/turn", headers=auth("ross")).json()
+    assert ross["to_act"] is True
+    assert ross["slice_index"] == 1
+    assert ross["turns_remaining"] == 29
+    state = client.get("/watch/state").json()
+    assert state["slices"][0]["state"] == "missed"
 
 
 def test_before_eight_and_eleven_lock(client):
@@ -120,7 +102,7 @@ def test_before_eight_and_eleven_lock(client):
     pin(client, "2026-10-28T07:30:00")
     parked = client.post(
         "/agent/act",
-        headers=auth("claude"),
+        headers=auth("ross"),
         json={"type": "paint", "pixels": [{"x": 0, "y": 0, "color": 1}]},
     )
     assert parked.status_code == 409
@@ -128,7 +110,7 @@ def test_before_eight_and_eleven_lock(client):
     pin(client, "2026-10-28T11:00:00")
     locked = client.post(
         "/agent/act",
-        headers=auth("claude"),
+        headers=auth("ross"),
         json={"type": "paint", "pixels": [{"x": 0, "y": 0, "color": 1}]},
     )
     assert locked.status_code == 409
@@ -172,7 +154,7 @@ def test_new_day_is_a_blank_canvas(client):
     opened = open_design(client)
     painted = client.post(
         "/agent/act",
-        headers=auth("claude"),
+        headers=auth("ross"),
         json={"type": "paint", "pixels": [{"x": 10, "y": 12, "color": 6}]},
     )
     assert painted.status_code == 200, painted.text
@@ -197,11 +179,11 @@ def test_new_day_is_a_blank_canvas(client):
         headers=host(),
     )
     assert old.json()["cells"] == [6]
-    grok = client.get("/agent/turn", headers=auth("grok-artist")).json()
+    ross = client.get("/agent/turn", headers=auth("ross")).json()
     claude = client.get("/agent/turn", headers=auth("claude")).json()
-    assert grok["to_act"] is True
+    assert ross["to_act"] is True
     assert claude["to_act"] is False
-    assert grok["palette"][0]["id"] == 0
+    assert ross["palette"][0]["id"] == 0
 
 
 def test_routine_phases_and_seat_token(client):
@@ -212,16 +194,15 @@ def test_routine_phases_and_seat_token(client):
     open_design(client, "2026-10-28T08:00:00")
     mid = client.post("/host/routine/tick", headers=host()).json()
     assert mid["phase"] == "slice"
-    assert mid["current_agent_id"] == "claude"
+    assert mid["current_agent_id"] == "ross"
     pin(client, "2026-10-28T11:00:00")
     done = client.post("/host/routine/tick", headers=host()).json()
     assert done["phase"] == "locked"
-    # Seat token acts as claude without the shared host key. Morning is locked, so the
-    # important check is that the token resolves the seat (not 401).
+    # Rewinding to 08:00 reopens turn 1. Ross's seat token passes it without the host key.
     pin(client, "2026-10-28T08:00:00")
     response = client.post(
         "/agent/act",
-        headers={"X-Seat-Token": "seat-claude"},
+        headers={"X-Seat-Token": "seat-ross"},
         json={"type": "pass"},
     )
     assert response.status_code == 200, response.text

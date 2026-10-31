@@ -84,14 +84,16 @@ def test_mixed_history_does_not_confuse_the_next_morning(client, monkeypatch):
     assert watch["status"] == "awaiting_design"
     for agent in ("claude", "grok-artist", "openai"):
         set_hook(client, agent, ["slice_open"], url=f"http://127.0.0.1:9/{agent}")
+    set_hook(client, "ross", ["slice_open"], url="http://127.0.0.1:9/ross")
     designed = _design(client, "October 30")
     assert designed["day_id"] == new_id
-    turn = client.get("/agent/turn", headers=auth(designed["first_agent_id"])).json()
+    assert designed["first_agent_id"] == "ross"
+    turn = client.get("/agent/turn", headers=auth("ross")).json()
     assert turn["day_id"] == new_id
     assert turn["to_act"] is True
     assert turn["slice_index"] == 0
     assert [item["day_id"] for item in payloads(seen)] == [new_id]
-    assert payloads(seen)[0]["seat"] == designed["first_agent_id"]
+    assert payloads(seen)[0]["seat"] == "ross"
     assert payloads(seen)[0]["event"] == "slice_open"
     client.get("/cron/tick", headers=CRON)
     assert len(seen) == 1
@@ -114,8 +116,8 @@ def test_morning_waits_until_a_running_one_off_locks(client, monkeypatch):
     assert client.get("/watch/state").json()["day_id"] == one_off
     assert client.get("/agent/turn", headers=auth("claude")).json()["day_id"] == one_off
 
-    # 07:50 plus eighteen 3-minute slices is 08:44.
-    pin(client, "2026-10-30T08:44:00")
+    # 07:50 plus thirty 3-minute turns is 09:20.
+    pin(client, "2026-10-30T09:20:00")
     started = client.get("/cron/tick", headers=CRON)
     assert started.status_code == 200, started.text
     assert started.json()["phase"] == "awaiting_design"

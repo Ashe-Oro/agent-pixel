@@ -50,6 +50,7 @@ from app.schedule import (
     configured_slice_count,
     day_bounds,
     design_wait_seconds,
+    is_solo_order,
     label_clock,
     label_hhmm,
     lock_label,
@@ -64,6 +65,9 @@ from app.schedule import (
     rotate,
     round_on_slice,
     rounds_in,
+    seats_for,
+    tile_turns,
+    turn_pixel_budget,
     session_length_phrase,
     session_minutes,
     walk_session,
@@ -93,7 +97,8 @@ _DAYS_COLUMNS = f"""
               archived INTEGER NOT NULL DEFAULT 0,
               archived_at INTEGER,
               slice_count INTEGER NOT NULL DEFAULT {LEGACY_SLICE_COUNT},
-              canvas_rev INTEGER NOT NULL DEFAULT 0
+              canvas_rev INTEGER NOT NULL DEFAULT 0,
+              turn_pixels INTEGER
 """
 
 # Latest-stroke cells stay in TurnView only while the list is small.
@@ -410,6 +415,7 @@ class Store:
             self.dirty = True
         self._migrate_days()
         self._ensure_slice_count()
+        self._ensure_turn_pixels()
         self._ensure_canvas_rev()
         self._ensure_action_history()
         cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(days)")}
@@ -541,6 +547,28 @@ class Store:
         )
         if cleared.rowcount:
             self.dirty = True
+
+    def _ensure_turn_pixels(self) -> None:
+        """Per-canvas turn budget. NULL on older rows means unlimited.
+
+        New canvases store ``TILE_PIXELS_PER_TURN`` at insert so a later
+        settings change does not resize an open or archived morning.
+        """
+        cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(days)")}
+        if "turn_pixels" in cols:
+            return
+        self.conn.execute("ALTER TABLE days ADD COLUMN turn_pixels INTEGER")
+        self.dirty = True
+
+    def _turn_pixels(self, day: sqlite3.Row | None) -> int | None:
+        if day is None or "turn_pixels" not in day.keys() or day["turn_pixels"] is None:
+            return None
+        return int(day["turn_pixels"])
+
+    def _is_solo_day(self, day: sqlite3.Row | None) -> bool:
+        if day is None:
+            return False
+        return is_solo_order(self._order_for(day))
 
     def _slice_total(self, day: sqlite3.Row | None) -> int:
         """Slice count for this canvas, or the current setting when there is no row."""
@@ -900,6 +928,9 @@ class Store:
             return walk_session(self._opens_at(day), {}, now, slice_count=total)
         acted, redos = self._slice_timing(day["id"])
         order = json.loads(day["artist_order_json"]) if day["artist_order_json"] else self._order_for(day)
+        solo = is_solo_order(order)
+        if solo:
+            redos = {}
         rows = self.conn.execute(
             """
             SELECT agent_id, slice_index, done, created_at FROM actions
@@ -916,8 +947,8 @@ class Store:
             self._opens_at(day),
             acted,
             now,
-            gate_seconds=note_gate_seconds(),
-            note_at=self._director_note_times(day["id"]),
+            gate_seconds=0 if solo else note_gate_seconds(),
+            note_at={} if solo else self._director_note_times(day["id"]),
             slice_count=total,
             redos=redos,
         )
@@ -962,13 +993,21 @@ class Store:
         brief: str,
         palette: list[dict[str, Any]],
     ) -> list[str]:
-        """Write the theme and start slice 0 at ``now``. Caller holds the write."""
-        settings = self._settings()
-        order = rotate(
-            json.loads(settings["roster_json"]),
-            day["day_index"],
-            bool(settings["rotate"]),
-        )
+        """Write the theme and start slice 0 at ``now``. Caller holds the write.
+
+        The painter order is fixed when the canvas is inserted. A solo canvas
+        stays ``["ross"]``. A row that never stored an order (a roster morning
+        from before that column was filled at insert) still takes the roster.
+        """
+        if day["artist_order_json"]:
+            order = json.loads(day["artist_order_json"])
+        else:
+            settings = self._settings()
+            order = rotate(
+                json.loads(settings["roster_json"]),
+                day["day_index"],
+                bool(settings["rotate"]),
+            )
         stamp = int(now.timestamp())
         cur = self.conn.execute(
             """
@@ -1008,11 +1047,21 @@ class Store:
         cursor = self.conn.execute(
             """
             INSERT INTO days (
-              day_index, ny_date, created_at, opens_at, kind, archived, slice_count
+              day_index, ny_date, created_at, opens_at, kind, archived, slice_count,
+              artist_order_json, turn_pixels
             )
-            VALUES (?, ?, ?, ?, ?, 0, ?)
+            VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
             """,
-            (nxt, key, int(now.timestamp()), stamp, kind, configured_slice_count()),
+            (
+                nxt,
+                key,
+                int(now.timestamp()),
+                stamp,
+                kind,
+                configured_slice_count(),
+                json.dumps([DIRECTOR_ID]),
+                turn_pixel_budget(),
+            ),
         )
         self.dirty = True
         return self.conn.execute("SELECT * FROM days WHERE id = ?", (cursor.lastrowid,)).fetchone()
@@ -1085,7 +1134,7 @@ class Store:
         its slice clock starts then so it is not born already half over.
         A canvas already open at or after 08:00 counts as this morning: the
         cron does not start a second one. After the latest lock for a new
-        morning (08:54 ET at the default of 6 rounds), with nothing waiting,
+        morning (09:30 ET at the default of 30 turns), with nothing waiting,
         no already-locked canvas is minted.
         """
         start, lock = day_bounds(now.astimezone(NY).date())
@@ -1261,6 +1310,12 @@ class Store:
                     raise ApiError(409, "no_day", "No canvas is open.")
                 if not day["theme"]:
                     raise ApiError(409, "awaiting_design", "Post the design before vetoing a slice.")
+                if self._is_solo_day(day):
+                    raise ApiError(
+                        409,
+                        "solo_canvas",
+                        "This canvas is painted by Ross alone. Correct a turn by painting over it.",
+                    )
                 total = self._slice_total(day)
                 if requested < 0 or requested >= total:
                     raise ApiError(400, "bad_veto", f"slice must be an integer from 0 through {total - 1}.")
@@ -1590,9 +1645,40 @@ class Store:
             "slice_index": index,
         }
 
+    def finish_canvas(self, agent_id: str) -> dict[str, Any]:
+        """Ross locks a solo canvas before the last turn.
+
+        The open turn is passed with ``done``, which skips every later turn
+        and locks the canvas. Pixels already placed stay.
+        """
+        if agent_id != DIRECTOR_ID:
+            raise ApiError(403, "wrong_role", "Only Ross can finish a canvas early.")
+        self._ensure_design_timeout()
+        with self.lock:
+            self._refresh()
+            now = self.now()
+            day = self.today_row()
+            if day is None:
+                raise ApiError(409, "no_day", "No canvas is open.")
+            if not self._is_solo_day(day):
+                raise ApiError(
+                    409,
+                    "not_solo",
+                    "Early finish is for a canvas Ross paints alone.",
+                )
+            if not day["theme"]:
+                raise ApiError(409, "awaiting_design", "Post the design before finishing the canvas.")
+            phase, _index = self._phase_for(day, now)
+            if phase != "during":
+                raise ApiError(409, "morning_locked", "This session is already locked.")
+        result = self.act(agent_id, {"type": "pass", "done": True})
+        result["locked"] = True
+        result["finished_early"] = True
+        return result
+
     def act(self, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        if agent_id not in ARTISTS:
-            raise ApiError(403, "wrong_role", "Only an artist can paint or pass.")
+        if agent_id not in ARTISTS and agent_id != DIRECTOR_ID:
+            raise ApiError(403, "wrong_role", "Only the painter of this canvas can paint or pass.")
         self._ensure_design_timeout()
         action = payload.get("type")
         if action not in ("paint", "pass"):
@@ -1612,6 +1698,10 @@ class Store:
                     raise ApiError(409, "no_day", "Today's canvas is not open yet.")
                 if not day["theme"]:
                     raise ApiError(409, "awaiting_design", "The design agent has not opened the canvas.")
+                order = self._order_for(day)
+                solo = is_solo_order(order)
+                if agent_id not in order:
+                    raise ApiError(403, "wrong_role", "Only the painter of this canvas can paint or pass.")
                 self._require_slice(day, agent_id, now)
                 phase, index = self._phase_for(day, now)
                 if index is None or phase != "during":
@@ -1632,12 +1722,20 @@ class Store:
                             raise ApiError(400, "bad_color", "Color is not in today's palette.")
                     collapsed = _collapse(raw)
                     charged = len(collapsed)
+                    budget = self._turn_pixels(day)
+                    if budget is not None and charged > budget:
+                        raise ApiError(
+                            400,
+                            "over_budget",
+                            f"This turn allows {budget} pixels. That paint places {charged}. "
+                            "The canvas was not changed.",
+                        )
                     focus = _parse_focus(payload.get("focus"))
-                    redo = self._session_clock(day, now).slices[index].redo
-                    # Slice 0 is the background. Vetoing it restores a blank
-                    # canvas, so the redo has to repaint most of it. Both
-                    # overfill caps (TILE_REDO_MAX_FRACTION and
-                    # TILE_REDO_MAX_DOMINANT) apply only to later slices.
+                    # A solo canvas has no veto, so the redo overfill guard
+                    # does not run. Ross overwrites his own pixels freely,
+                    # up to the per-turn budget. On a roster canvas, slice 0
+                    # stays exempt: vetoing it restores a blank canvas.
+                    redo = False if solo else self._session_clock(day, now).slices[index].redo
                     if redo and index != 0:
                         revert_reason = redo_overfill(bytes(day["canvas"]), collapsed)
                     if revert_reason:
@@ -1678,7 +1776,7 @@ class Store:
                             day["id"],
                             agent_id,
                             index,
-                            round_on_slice(index),
+                            round_on_slice(index, seats_for(order)),
                             action,
                             1 if done else 0,
                             charged,
@@ -1797,7 +1895,22 @@ class Store:
 
     def turn_view(self, agent_id: str) -> dict[str, Any]:
         if agent_id == DIRECTOR_ID:
-            return self.ross_view()
+            self._ensure_design_timeout()
+            with self.lock:
+                self._refresh()
+                now = self.now()
+                day = self.today_row()
+                if day is None:
+                    designed = self._designed_rows()
+                    day = designed[0] if designed else None
+                if day is not None and self._is_solo_day(day) and day["theme"]:
+                    view = self._turn_from(day, agent_id, now)
+                else:
+                    view = self._ross_from(day, now)
+                    if day is not None and self._is_solo_day(day):
+                        view.update(self._solo_budget(day))
+            self._dispatch_quietly()
+            return view
         if agent_id not in ARTISTS:
             raise ApiError(403, "wrong_role", "TurnView is for an artist seat.")
         self._ensure_design_timeout()
@@ -1840,20 +1953,21 @@ class Store:
         designed = bool(day and day["theme"])
         order = self._order_for(day)
         to_act = self.can_act(day, agent_id, now)
-        turn_left = None if to_act else 0
         total = self._slice_total(day)
+        seats = seats_for(order)
+        solo = is_solo_order(order)
         if phase == "during" and index is not None:
-            round_index = round_on_slice(index)
+            round_index = round_on_slice(index, seats)
         elif phase in ("before", "awaiting"):
             round_index = 1
         elif day is not None:
             clock = self._session_clock(day, now)
             if clock.holding_index is not None:
-                round_index = round_on_slice(clock.holding_index)
+                round_index = round_on_slice(clock.holding_index, seats)
             else:
-                round_index = rounds_in(total)
+                round_index = rounds_in(total, seats)
         else:
-            round_index = rounds_in(total)
+            round_index = rounds_in(total, seats)
         slice_start, slice_end = self._slice_bounds(day, now, phase, index)
         palette = json.loads(day["palette_json"]) if day and day["palette_json"] else []
         focus = None
@@ -1868,6 +1982,11 @@ class Store:
             if clock.phase == "holding" and clock.holding_index is not None:
                 note_slice = clock.holding_index
         director_note = self._redo_turn_note(day, note_slice, now) if day else None
+        budget = self._turn_pixels(day)
+        if budget is None:
+            turn_left = None if to_act else 0
+        else:
+            turn_left = budget if to_act else 0
         redo = False
         veto_note = None
         if day is not None and phase == "during" and index is not None:
@@ -1908,6 +2027,24 @@ class Store:
             "canvas_stats": _stats(bytes(day["canvas"]) if day and day["canvas"] is not None else None, palette),
             "roster": [{"agent_id": agent, "display_name": DISPLAY[agent]} for agent in order],
             "current_agent_id": artist_on_slice(order, index) if index is not None and designed else None,
+            "solo": solo,
+            "turn": (index + 1) if index is not None else None,
+            "turns": total,
+            "pixels_per_turn": budget,
+            "seconds_per_turn": SLICE_SECONDS,
+            "render_url": _png_url(day, 2),
+        }
+
+    def _solo_budget(self, day: sqlite3.Row) -> dict[str, Any]:
+        total = self._slice_total(day)
+        deadline = None if day["theme"] else self._design_deadline(day)
+        return {
+            "solo": True,
+            "turns": total,
+            "pixels_per_turn": self._turn_pixels(day),
+            "seconds_per_turn": SLICE_SECONDS,
+            "design_wait_seconds": design_wait_seconds(),
+            "design_deadline_unix": int(deadline.timestamp()) if deadline else None,
         }
 
     def routine_tick(self) -> dict[str, Any]:
@@ -2008,6 +2145,9 @@ class Store:
             note = self._redo_turn_note(day, clock.index, now)
             if clock.slices[clock.index].redo:
                 veto_note = self._veto_brief(int(day["id"]), clock.index)
+        order = self._order_for(day)
+        solo = is_solo_order(order)
+        palette = json.loads(day["palette_json"]) if day["palette_json"] else []
         return plan_wakes(
             day_id=int(day["id"]),
             theme=bool(day["theme"]),
@@ -2015,7 +2155,7 @@ class Store:
             phase=clock.phase,
             index=clock.index,
             slices=clock.slices,
-            order=self._order_for(day),
+            order=order,
             hooks=hooks,
             now=now,
             lock_at=clock.lock_at,
@@ -2026,6 +2166,10 @@ class Store:
             holding_index=clock.holding_index,
             veto_note=veto_note,
             render_rev=_canvas_rev(day),
+            solo=solo,
+            pixels_per_turn=self._turn_pixels(day),
+            palette=palette,
+            design_wait=None if day["theme"] else design_wait_seconds(),
         )
 
     def _post_and_finish(self, intent: WakeIntent) -> dict[str, Any]:
@@ -2271,16 +2415,25 @@ class Store:
             )
         else:
             public_phase = "slice"
-            order = json.loads(day["artist_order_json"])
+            order = json.loads(day["artist_order_json"]) if day["artist_order_json"] else self._order_for(day)
             current = artist_on_slice(order, index)
             clock = self._session_clock(day, now)
             slice_end = clock.deadline or clock.lock_at
             live = clock.slices[index] if index is not None else None
+            solo = is_solo_order(order)
             if live is not None and live.redo:
                 hint = (
                     f"GET /agent/turn as {current}, then POST /agent/act with one paint or pass "
                     f"before {label_hhmm(slice_end)} ET. This redo replaces the vetoed slice. "
                     f"The review gate runs after it closes."
+                )
+            elif solo:
+                turn = (index + 1) if index is not None else 0
+                hint = (
+                    f"GET /agent/turn as ross, then POST /agent/act with one paint or pass "
+                    f"before {label_hhmm(slice_end)} ET. Turn {turn} of {self._slice_total(day)}. "
+                    f"This turn is {SLICE_SECONDS // 60} minutes and ends when you act. "
+                    f"POST /agent/finish locks the canvas early."
                 )
             else:
                 hint = (
@@ -2288,13 +2441,15 @@ class Store:
                     f"before {label_hhmm(slice_end)} ET. This slice is 3 minutes, and the next "
                     f"artist opens as soon as you act."
                 )
+        order_now = json.loads(day["artist_order_json"]) if day["artist_order_json"] else self._order_for(day)
+        seats = seats_for(order_now)
         return {
             "ok": True,
             "phase": public_phase,
             "ny_now": now.astimezone(NY).isoformat(),
             "ny_label": label_clock(now),
             "slice_index": index,
-            "round_index": round_on_slice(index) if index is not None else None,
+            "round_index": round_on_slice(index, seats) if index is not None else None,
             "current_agent_id": current,
             "hint": hint,
             "waiting_until_unix": waiting_until,
@@ -2396,7 +2551,9 @@ class Store:
                 "grid_w": GRID,
                 "grid_h": GRID,
                 "clock": clock,
-                "schedule": _schedule_meta(),
+                "schedule": _schedule_meta(solo=True, turn_pixels=turn_pixel_budget()),
+                "solo": True,
+                "turns": tile_turns(),
                 "slices": [],
                 "chat": [],
                 "archive": archive,
@@ -2404,8 +2561,11 @@ class Store:
                 "viewing_archive": False,
             }
         order = self._order_for(featured)
+        solo = is_solo_order(order)
+        seats = seats_for(order)
         palette = json.loads(featured["palette_json"]) if featured["palette_json"] else []
         total = self._slice_total(featured)
+        budget = self._turn_pixels(featured)
         is_live = today is not None and featured["id"] == today["id"] and not int(featured["archived"])
         session = self._session_clock(featured, now) if is_live else None
         if not is_live:
@@ -2484,7 +2644,10 @@ class Store:
             "focus_crop_url": _crop_url(featured, focus),
             "current_agent_id": current,
             "current_display_name": DISPLAY[current] if current else None,
-            "round_index": round_on_slice(live_index) if live_index is not None else None,
+            "solo": solo,
+            "turn": (live_index + 1) if live_index is not None else None,
+            "turns": total,
+            "round_index": round_on_slice(live_index, seats) if live_index is not None else None,
             "slice_index": live_index,
             "slice_ends_at_unix": slice_end,
             "waiting_until_unix": (
@@ -2493,7 +2656,9 @@ class Store:
                 else None
             ),
             "turns_remaining": active["turns_remaining"] if active else None,
-            "pixels_remaining_turn": None if active else 0,
+            "pixels_remaining_turn": (
+                budget if active else 0
+            ) if budget is not None else (None if active else 0),
             "artists": artists,
             "slices": slices,
             "chat": self._chat_rows(featured["id"]),
@@ -2503,7 +2668,7 @@ class Store:
                 palette,
             ),
             "clock": clock,
-            "schedule": _schedule_meta(total),
+            "schedule": _schedule_meta(total, solo=solo, turn_pixels=budget),
             "archive": archive,
             "viewing_archive": bool(day_id is not None and default_feature is not None and featured["id"] != default_feature["id"]),
         }
@@ -2979,6 +3144,7 @@ class Store:
             index = mark.index
             begin, end = mark.opens, mark.closes
             agent = artist_on_slice(order, index)
+            seats = seats_for(order)
             action = actions.get(index)
             ended_early = skip_from.get(agent)
             if action is not None:
@@ -3032,7 +3198,8 @@ class Store:
             board.append(
                 {
                     "index": index,
-                    "round": round_on_slice(index),
+                    "round": round_on_slice(index, seats),
+                    "turn": index + 1,
                     "agent_id": agent,
                     "display_name": DISPLAY[agent],
                     "starts": label_hhmm(begin),
@@ -3048,6 +3215,7 @@ class Store:
         return board
 
     def _gallery_item(self, row: sqlite3.Row, now: datetime) -> dict[str, Any]:
+        order = self._order_for(row)
         return {
             "day_id": row["id"],
             "day_index": row["day_index"],
@@ -3056,6 +3224,9 @@ class Store:
             "kind": row["kind"],
             "status": self._status(row, now),
             "archived": bool(row["archived"]),
+            "solo": is_solo_order(order),
+            "painters": [DISPLAY[agent] for agent in order],
+            "turns": self._slice_total(row),
             "preview_url": _png_url(row, 2),
             "open_url": f"/canvas/{row['id']}",
         }
@@ -3097,12 +3268,7 @@ class Store:
                     self.conn.commit()
                     self.dirty = True
                     return
-                settings = self._settings()
-                order = rotate(
-                    json.loads(settings["roster_json"]),
-                    day["day_index"],
-                    bool(settings["rotate"]),
-                )
+                order = [DIRECTOR_ID]
                 canvas = blank_canvas()
                 draw_cabin(canvas)
                 self.conn.execute(
@@ -3166,21 +3332,30 @@ def _lock_time(ny_date_text: str, slice_count: int | None = None) -> datetime:
     return lock
 
 
-def _schedule_meta(slice_count: int | None = None) -> dict[str, Any]:
+def _schedule_meta(
+    slice_count: int | None = None,
+    solo: bool = False,
+    turn_pixels: int | None = None,
+) -> dict[str, Any]:
     """Schedule block for one canvas, or for a new morning when ``slice_count`` is omitted."""
     total = resolve_slice_count(slice_count)
-    rounds = rounds_in(total)
+    seats = 1 if solo else len(ARTISTS)
+    rounds = rounds_in(total, seats)
     return {
         "tz": "America/New_York",
         "opens": "08:00",
         "locks": lock_label(total),
         "slice_seconds": SLICE_SECONDS,
         "slice_minutes": SLICE_SECONDS // 60,
+        "seconds_per_turn": SLICE_SECONDS,
+        "solo": solo,
+        "painter": DIRECTOR_ID if solo else None,
         "rounds": rounds,
+        "turns": total,
         "slices": total,
-        "pixels_per_turn": PIXELS_PER_TURN,
+        "pixels_per_turn": turn_pixels if solo else PIXELS_PER_TURN,
         "pixels_per_artist_day": PIXELS_PER_ARTIST_DAY,
-        "turns_per_artist": rounds,
+        "turns_per_artist": total if solo else rounds,
         "session_minutes": session_minutes(total),
         "session_length": session_length_phrase(total),
     }
@@ -3191,9 +3366,9 @@ def _status_message(status: str, slice_count: int | None = None) -> str:
     return {
         "no_day": "No canvas for this date yet. The morning routine opens one at 8:00 ET.",
         "before_open": "The canvas is ready and waiting. Painting starts at 8:00 ET.",
-        "awaiting_design": "Waiting for the art director to publish today's theme and 16 colors.",
+        "awaiting_design": "Waiting for Ross to publish today's theme and 16 colors.",
         "review": "Waiting for the art director before the next slice opens.",
-        "painting": "The morning is open. One artist holds the brush for this 3-minute slice.",
+        "painting": "The morning is open. The painter holds the brush for this 3-minute turn.",
         "locked": (
             f"Locked. A morning lasts at most {length} after 08:00 ET, "
             "and the next one starts blank."

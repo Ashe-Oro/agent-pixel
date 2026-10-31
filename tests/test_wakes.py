@@ -84,12 +84,12 @@ def test_cron_advances_a_slice_when_its_deadline_passes(client, monkeypatch):
     first = client.get("/cron/tick", headers=CRON)
     assert first.json()["phase"] == "slice"
     assert first.json()["slice_index"] == 0
-    assert first.json()["current_agent_id"] == "claude"
+    assert first.json()["current_agent_id"] == "ross"
     pin(client, "2026-10-28T08:03:00")
     second = client.get("/cron/tick", headers=CRON)
     assert second.json()["slice_index"] == 1
-    assert second.json()["current_agent_id"] == "grok-artist"
-    assert client.get("/agent/turn", headers=auth("grok-artist")).json()["to_act"] is True
+    assert second.json()["current_agent_id"] == "ross"
+    assert client.get("/agent/turn", headers=auth("ross")).json()["to_act"] is True
     assert client.get("/agent/turn", headers=auth("claude")).json()["to_act"] is False
 
 
@@ -98,12 +98,11 @@ def test_wake_is_signed_once_and_a_later_slice_still_wakes(client, monkeypatch):
     monkeypatch.setenv("CRON_SECRET", "cron-secret")
     monkeypatch.setenv("TILE_PUBLIC_BASE_URL", "https://pixel.example")
     open_design(client, "2026-10-28T08:00:00")
-    saved = set_hook(client, "Claude", ["slice_open"], url="http://127.0.0.1:9/claude")
-    assert saved["seat"] == "claude"
-    set_hook(client, "ross", ["slice_closed"], url="http://127.0.0.1:9/ross")
+    saved = set_hook(client, "ross", ["slice_open"], url="http://127.0.0.1:9/ross")
+    assert saved["seat"] == "ross"
     set_hook(client, "Studio-Guest", ["slice_closed"], url="http://127.0.0.1:9/guest")
 
-    turn = client.get("/agent/turn", headers=auth("claude"))
+    turn = client.get("/agent/turn", headers=auth("ross"))
     assert turn.status_code == 200
     assert len(seen) == 1
     client.get("/watch/state")
@@ -118,31 +117,32 @@ def test_wake_is_signed_once_and_a_later_slice_still_wakes(client, monkeypatch):
     assert headers["user-agent"] == "agent-pixel-wake"
     payload = json.loads(body)
     start = datetime(2026, 10, 28, 8, 0, tzinfo=NY)
-    assert payload == {
-        "api_base_url": "https://pixel.example",
-        "brief": "Warm cabin, tall pines, soft chimney smoke, night sky",
-        "day_id": turn.json()["day_id"],
-        "director_note": None,
-        "ends_at_unix": int((start + timedelta(seconds=180)).timestamp()),
-        "event": "slice_open",
-        "seat": "claude",
-        "slice": 0,
-    }
+    assert payload["seat"] == "ross"
+    assert payload["event"] == "slice_open"
+    assert payload["slice"] == 0
+    assert payload["turn"] == 1
+    assert payload["turns"] == 30
+    assert payload["seconds_per_turn"] == 180
+    assert payload["pixels_per_turn"] == 16384
+    assert payload["brief"] == "Warm cabin, tall pines, soft chimney smoke, night sky"
+    assert payload["ends_at_unix"] == int((start + timedelta(seconds=180)).timestamp())
+    assert payload["render_url"] == f"/watch/canvas.png?day_id={turn.json()['day_id']}&scale=2"
+    assert payload["canvas_url"] == "https://pixel.example" + payload["render_url"]
+    assert payload["palette"]
     assert "brief" not in client.get("/watch/state").json()
     assert SECRET not in body.decode()
     assert "test-key" not in body.decode()
     assert "seat-claude" not in body.decode()
 
-    passed = client.post("/agent/act", headers=auth("claude"), json={"type": "pass"})
+    passed = client.post("/agent/act", headers=auth("ross"), json={"type": "pass"})
     assert passed.status_code == 200, passed.text
-    assert [item["seat"] for item in payloads(seen)] == ["claude", "ross", "studio-guest"]
-    for item in payloads(seen)[1:]:
-        assert item["event"] == "slice_closed"
-        assert item["slice"] == 0
-        assert item["render_url"] == f"/watch/canvas.png?day_id={item['day_id']}&scale=2"
-        assert item["seat"] in ("ross", "studio-guest")
+    assert [item["seat"] for item in payloads(seen)] == ["ross", "ross"]
+    assert payloads(seen)[1]["event"] == "slice_open"
+    assert payloads(seen)[1]["turn"] == 2
+    assert payloads(seen)[1]["slice"] == 1
+    assert all(item["seat"] != "studio-guest" for item in payloads(seen))
     client.get("/cron/tick", headers=CRON)
-    assert len(seen) == 3
+    assert len(seen) == 2
 
     listed = client.get("/host/wakes", headers=host())
     assert listed.status_code == 200
@@ -150,18 +150,18 @@ def test_wake_is_signed_once_and_a_later_slice_still_wakes(client, monkeypatch):
     assert client.get("/host/wakes").status_code == 401
     directory = client.get("/host/seats/webhooks", headers=host()).json()
     assert SECRET not in json.dumps(directory)
-    assert {item["seat"] for item in directory["seats"]} == {"claude", "ross", "studio-guest"}
+    assert {item["seat"] for item in directory["seats"]} == {"ross", "studio-guest"}
 
 
 def test_failed_wakes_retry_until_sent_and_stop_when_the_slice_closes(client, monkeypatch):
     codes = iter([500, 200])
     seen = install_poster(monkeypatch, status=lambda: next(codes))
     open_design(client, "2026-10-28T08:00:00")
-    set_hook(client, "claude", ["slice_open"])
+    set_hook(client, "ross", ["slice_open"])
     client.get("/watch/state")
     assert len(seen) == 1
     assert payloads(seen)[0]["slice"] == 0
-    client.get("/agent/turn", headers=auth("claude"))
+    client.get("/agent/turn", headers=auth("ross"))
     assert len(seen) == 2
     client.get("/watch/state")
     assert len(seen) == 2
@@ -174,7 +174,7 @@ def test_failed_wakes_retry_until_sent_and_stop_when_the_slice_closes(client, mo
 def test_retries_stop_at_three_while_the_slice_is_open(client, monkeypatch):
     seen = install_poster(monkeypatch, status=500)
     open_design(client, "2026-10-28T08:00:00")
-    set_hook(client, "claude", ["slice_open"])
+    set_hook(client, "ross", ["slice_open"])
     for _ in range(4):
         client.get("/watch/state")
     assert len(seen) == 3
@@ -186,13 +186,16 @@ def test_retries_stop_at_three_while_the_slice_is_open(client, monkeypatch):
 def test_a_failed_wake_is_not_retried_after_the_slice_closes(client, monkeypatch):
     seen = install_poster(monkeypatch, status=500)
     open_design(client, "2026-10-28T08:00:00")
-    set_hook(client, "claude", ["slice_open"])
+    set_hook(client, "ross", ["slice_open"])
     client.get("/watch/state")
     assert len(seen) == 1
     pin(client, "2026-10-28T08:03:00")
     client.get("/watch/state")
-    client.get("/agent/turn", headers=auth("claude"))
-    assert len(seen) == 1
+    rows = client.get("/host/wakes", headers=host()).json()["wakes"]
+    first = next(row for row in rows if row["slice"] == 0)
+    assert first["attempts"] == 1
+    assert first["status"] == "failed"
+    assert any(row["slice"] == 1 for row in rows)
 
 
 def test_clearing_a_webhook_beats_the_env_map(client, monkeypatch):
@@ -205,7 +208,7 @@ def test_clearing_a_webhook_beats_the_env_map(client, monkeypatch):
     cleared = client.delete("/host/seats/grok-artist/webhook", headers=host())
     assert cleared.status_code == 200
     assert cleared.json()["enabled"] is False
-    passed = client.post("/agent/act", headers=auth("claude"), json={"type": "pass"})
+    passed = client.post("/agent/act", headers=auth("ross"), json={"type": "pass"})
     assert passed.status_code == 200, passed.text
     assert seen == []
     directory = client.get("/host/seats/webhooks", headers=host()).json()["seats"]
@@ -253,8 +256,8 @@ def test_canvas_locked_wakes_a_host_seat(client, monkeypatch):
     monkeypatch.setenv("TILE_PUBLIC_BASE_URL", "https://pixel.example")
     open_design(client, "2026-10-28T08:00:00")
     set_hook(client, "host", ["canvas_locked"], url="http://127.0.0.1:9/host")
-    set_hook(client, "ross", ["slice_closed"], url="http://127.0.0.1:9/ross")
-    pin(client, "2026-10-28T08:54:00")
+    set_hook(client, "ross", ["canvas_locked"], url="http://127.0.0.1:9/ross")
+    pin(client, "2026-10-28T09:30:00")
     response = client.get("/cron/tick", headers=CRON)
     assert response.status_code == 200, response.text
     assert response.json()["phase"] == "locked"
@@ -263,8 +266,8 @@ def test_canvas_locked_wakes_a_host_seat(client, monkeypatch):
     assert by_seat["host"]["event"] == "canvas_locked"
     assert by_seat["host"]["slice"] is None
     assert by_seat["host"]["render_url"] == f"/watch/canvas.png?day_id={by_seat['host']['day_id']}&scale=2"
-    assert by_seat["ross"]["event"] == "slice_closed"
-    assert by_seat["ross"]["slice"] == 17
+    assert by_seat["ross"]["event"] == "canvas_locked"
+    assert by_seat["ross"]["slice"] is None
     client.get("/cron/tick", headers=CRON)
     assert len(seen) == 2
 
@@ -302,7 +305,7 @@ def test_bearer_is_sent_and_never_returned(client, monkeypatch):
     bearer = "sender-key-do-not-leak"
     saved = set_hook(
         client,
-        "claude",
+        "ross",
         ["slice_open"],
         secret="",
         extra={"bearer": bearer},
@@ -310,7 +313,7 @@ def test_bearer_is_sent_and_never_returned(client, monkeypatch):
     assert saved["bearer_set"] is True
     assert bearer not in json.dumps(saved)
     open_design(client, "2026-10-28T08:00:00")
-    client.get("/agent/turn", headers=auth("claude"))
+    client.get("/agent/turn", headers=auth("ross"))
     assert len(seen) == 1
     headers = {key.lower(): value for key, value in seen[0]["headers"].items()}
     assert headers["authorization"] == f"Bearer {bearer}"
@@ -324,10 +327,10 @@ def test_bearer_is_sent_and_never_returned(client, monkeypatch):
     assert bearer not in wakes.text
 
     both = client.put(
-        "/host/seats/grok-artist/webhook",
+        "/host/seats/ross/webhook",
         headers=host(),
         json={
-            "url": "http://127.0.0.1:9/grok",
+            "url": "http://127.0.0.1:9/ross-both",
             "secret": SECRET,
             "bearer": bearer,
             "events": ["slice_open"],
@@ -337,14 +340,14 @@ def test_bearer_is_sent_and_never_returned(client, monkeypatch):
     assert bearer not in both.text
     assert SECRET not in both.text
     assert both.json()["bearer_set"] is True
-    client.post("/agent/act", headers=auth("claude"), json={"type": "pass"})
-    grok = next(item for item in seen if item["url"].endswith("/grok"))
-    grok_headers = {key.lower(): value for key, value in grok["headers"].items()}
-    assert grok_headers["authorization"] == f"Bearer {bearer}"
-    body = grok["body"]
-    stamp = grok_headers["x-agent-pixel-timestamp"]
+    client.post("/agent/act", headers=auth("ross"), json={"type": "pass"})
+    both_wake = next(item for item in seen if item["url"].endswith("/ross-both"))
+    both_headers = {key.lower(): value for key, value in both_wake["headers"].items()}
+    assert both_headers["authorization"] == f"Bearer {bearer}"
+    body = both_wake["body"]
+    stamp = both_headers["x-agent-pixel-timestamp"]
     expected = hmac.new(SECRET.encode(), stamp.encode() + b"." + body, hashlib.sha256).hexdigest()
-    assert grok_headers["x-agent-pixel-signature"] == f"sha256={expected}"
+    assert both_headers["x-agent-pixel-signature"] == f"sha256={expected}"
     assert bearer.encode() not in body
 
     missing = client.put(
@@ -361,7 +364,7 @@ def test_env_bearer_wakes_without_an_hmac_secret(client, monkeypatch):
     bearer = "env-sender-key-do-not-leak"
     monkeypatch.setenv(
         "TILE_SEAT_WEBHOOKS",
-        json.dumps({"claude": {"url": "http://127.0.0.1:9/claude", "bearer": bearer}}),
+        json.dumps({"ross": {"url": "http://127.0.0.1:9/ross", "bearer": bearer}}),
     )
     open_design(client, "2026-10-28T08:00:00")
     client.get("/watch/state")
@@ -377,6 +380,6 @@ def test_env_bearer_wakes_without_an_hmac_secret(client, monkeypatch):
 def test_seat_without_a_webhook_still_polls(client, monkeypatch):
     seen = install_poster(monkeypatch)
     open_design(client, "2026-10-28T08:00:00")
-    turn = client.get("/agent/turn", headers=auth("claude"))
+    turn = client.get("/agent/turn", headers=auth("ross"))
     assert turn.json()["to_act"] is True
     assert seen == []
