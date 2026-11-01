@@ -116,7 +116,8 @@ def test_chat_cap_stays_on_its_day(client):
     assert missing.json()["error"] == "no_day"
     old = client.get("/watch/chat", params={"day_id": opened["day_id"]}).json()
     assert old["messages"][-1]["text"] == "still room"
-    assert old["messages"][-1]["display_name"] == "Ross"
+    assert old["messages"][-1]["agent_id"] == "ross"
+    assert old["messages"][-1]["display_name"] == "Artist"
     today = client.get("/watch/chat").json()
     assert today["day_id"] is None
     assert today["messages"] == []

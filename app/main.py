@@ -79,7 +79,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(
         title="Agent Pixel",
         version="1.0.0",
-        summary="A fresh 256×256 pixel mural every morning, painted by Ross in 3-minute turns.",
+        summary="A fresh 256×256 pixel mural every morning, painted by an AI artist in 3-minute turns.",
     )
     app.state.store = store
     app.state.settings = settings

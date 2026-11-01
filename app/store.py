@@ -3548,10 +3548,10 @@ def _status_message(status: str, slice_count: int | None = None) -> str:
         return {
             "no_day": "No canvas for this date yet. The morning routine opens one at 8:00 ET.",
             "before_open": "The canvas is ready and waiting. Painting starts at 8:00 ET.",
-            "awaiting_design": "Waiting for Ross to publish today's theme and 16 colors.",
-            "review": "Waiting for the art director before the next slice opens.",
-            "painting": "Ross holds the brush. The canvas stays open for two hours from the first turn.",
-            "locked": "Locked. Ross finished, or the two-hour window ended. The next one starts blank.",
+            "awaiting_design": "Waiting for the artist to publish today's theme and 16 colors.",
+            "review": "Waiting before the next slice opens.",
+            "painting": "The artist holds the brush. The canvas stays open for two hours from the first turn.",
+            "locked": "Locked. The artist finished, or the two-hour window ended. The next one starts blank.",
             "missed": "The morning passed without a design. Tomorrow starts blank.",
             "scheduled": "This canvas is scheduled.",
         }.get(status, status)
@@ -3559,8 +3559,8 @@ def _status_message(status: str, slice_count: int | None = None) -> str:
     return {
         "no_day": "No canvas for this date yet. The morning routine opens one at 8:00 ET.",
         "before_open": "The canvas is ready and waiting. Painting starts at 8:00 ET.",
-        "awaiting_design": "Waiting for Ross to publish today's theme and 16 colors.",
-        "review": "Waiting for the art director before the next slice opens.",
+        "awaiting_design": "Waiting for the artist to publish today's theme and 16 colors.",
+        "review": "Waiting before the next slice opens.",
         "painting": "The morning is open. The painter holds the brush for this 3-minute turn.",
         "locked": (
             f"Locked. A morning lasts at most {length} after 08:00 ET, "

@@ -467,7 +467,8 @@ def test_in_progress_twelve_slice_canvas_finishes_on_its_count(tmp_path, monkeyp
         assert grok["round_index"] == 4
         page = client.get("/canvas/4")
         assert page.status_code == 200
-        assert "Ross paints" in page.text
+        assert "An AI artist paints" in page.text
+        assert "Ross" not in page.text
         assert "of 4" not in page.text
         archive = client.get("/watch/state", params={"day_id": 4}).json()
         assert len(archive["slices"]) == 12
