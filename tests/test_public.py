@@ -12,12 +12,15 @@ def test_skill_matches_contract(client):
     assert body == (ROOT / "skill.md").read_text(encoding="utf-8")
     assert "256×256" in body
     assert "08:00" in body
-    assert "09:30" in body
+    assert "7200" in body
+    assert "09:30" not in body
     assert "08:54" not in body
     assert "3 minutes" in body
     assert "Ross" in body
     assert "16384" in body
-    assert "TILE_TURNS" in body
+    assert "TILE_SOLO_WINDOW_SECONDS" in body
+    assert "canvas_ends_at_unix" in body
+    assert "seconds_left_canvas" in body
     assert "POST /agent/finish" in body
     assert "2×2" in body
     assert "canvas_url" in body
@@ -35,10 +38,13 @@ def test_watch_page_uses_crisp_pixels(client):
     assert 'id="slice-next"' in page
     assert "overflow-x: auto" in page
     assert "repeat(3, minmax(0, 1fr))" not in page
-    assert "90 minutes" in page
+    assert "2 hours" in page
+    assert "90 minutes" not in page
     assert "54 minutes" not in page
     assert "Ross paints" in page
-    assert "turn ${esc(data.turn)} / ${esc(data.turns)}" in page
+    assert "timeLeft" in page
+    assert "m left" in page
+    assert "turnLine" in page
     assert "of ${esc(roundTotal)}" in page
     assert "of 4" not in page
     assert "slices.dense" in page
@@ -91,12 +97,15 @@ def test_seeded_morning_is_paintable(tmp_path):
         assert state["solo"] is True
         assert state["current_agent_id"] == "ross"
         assert state["turn"] == 1
-        assert state["turns"] == 30
+        assert state["turns"] is None
+        assert state["seconds_left_canvas"] > 0
+        assert state["canvas_ends_at_unix"]
         assert len(state["palette"]) == 16
-        assert len(state["slices"]) == 30
-        assert state["schedule"]["slices"] == 30
-        assert state["schedule"]["locks"] == "09:30"
-        assert state["schedule"]["turns_per_artist"] == 30
+        assert len(state["slices"]) == 1
+        assert state["schedule"]["slices"] is None
+        assert state["schedule"]["locks"] == "10:00"
+        assert state["schedule"]["turns_per_artist"] is None
+        assert state["schedule"]["solo_window_seconds"] == 7200
         assert state["pixels_remaining_turn"] == 16384
         assert state["schedule"]["pixels_per_turn"] == 16384
         assert state["schedule"]["pixels_per_artist_day"] is None

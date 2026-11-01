@@ -26,7 +26,8 @@ def test_new_canvas_is_thirty_ross_turns(client, monkeypatch):
     assert wake["event"] == "design_needed"
     assert wake["seat"] == "ross"
     assert wake["design_wait_seconds"] == 900
-    assert wake["turns"] == 30
+    assert wake["turns"] is None
+    assert wake["solo_window_seconds"] == 7200
     assert wake["seconds_per_turn"] == 180
     assert wake["pixels_per_turn"] == 16384
     assert "brief" not in wake
@@ -42,12 +43,14 @@ def test_new_canvas_is_thirty_ross_turns(client, monkeypatch):
     state = client.get("/watch/state").json()
     assert state["solo"] is True
     assert state["turn"] == 1
-    assert state["turns"] == 30
-    assert len(state["slices"]) == 30
+    assert state["turns"] is None
+    assert len(state["slices"]) == 1
     assert state["current_agent_id"] == "ross"
     assert state["current_display_name"] == "Ross"
     assert [item["agent_id"] for item in state["artists"]] == ["ross"]
-    assert state["schedule"]["locks"] == "09:30"
+    assert state["schedule"]["locks"] == "10:00"
+    assert state["canvas_ends_at_unix"]
+    assert state["seconds_left_canvas"] == 7200
     assert state["schedule"]["pixels_per_turn"] == 16384
     assert state["schedule"]["seconds_per_turn"] == 180
     assert state["pixels_remaining_turn"] == 16384
@@ -60,7 +63,9 @@ def test_new_canvas_is_thirty_ross_turns(client, monkeypatch):
     turn_wake = paint[0]
     assert turn_wake["seat"] == "ross"
     assert turn_wake["turn"] == 1
-    assert turn_wake["turns"] == 30
+    assert turn_wake["turns"] is None
+    assert turn_wake["canvas_ends_at_unix"] == state["canvas_ends_at_unix"]
+    assert turn_wake["seconds_left_canvas"] == 7200
     assert turn_wake["slice"] == 0
     assert turn_wake["seconds_per_turn"] == 180
     assert turn_wake["pixels_per_turn"] == 16384
@@ -75,7 +80,9 @@ def test_new_canvas_is_thirty_ross_turns(client, monkeypatch):
     desk = client.get("/agent/turn", headers={"X-Seat-Token": "seat-ross"}).json()
     assert desk["to_act"] is True
     assert desk["turn"] == 1
-    assert desk["turns"] == 30
+    assert desk["turns"] is None
+    assert desk["canvas_ends_at_unix"]
+    assert desk["seconds_left_canvas"] == 7200
     assert desk["pixels_per_turn"] == 16384
     assert desk["pixels_remaining_turn"] == 16384
     assert desk["seconds_per_turn"] == 180
@@ -85,7 +92,7 @@ def test_new_canvas_is_thirty_ross_turns(client, monkeypatch):
 
 
 def test_turn_count_is_stored_and_old_canvases_keep_theirs(client, monkeypatch):
-    monkeypatch.setenv("TILE_TURNS", "4")
+    monkeypatch.setenv("TILE_SOLO_WINDOW_SECONDS", "600")
     monkeypatch.setenv("TILE_PIXELS_PER_TURN", "100")
     legacy = open_legacy_design(client, "2026-10-28T08:00:00", slice_count=12)
     legacy_state = client.get("/watch/state").json()
@@ -108,8 +115,10 @@ def test_turn_count_is_stored_and_old_canvases_keep_theirs(client, monkeypatch):
     assert designed.status_code == 200, designed.text
     state = client.get("/watch/state").json()
     assert state["solo"] is True
-    assert state["turns"] == 4
-    assert len(state["slices"]) == 4
+    assert state["turns"] is None
+    assert len(state["slices"]) == 1
+    assert state["solo_window_seconds"] == 600
+    assert state["seconds_left_canvas"] == 600
     assert state["schedule"]["pixels_per_turn"] == 100
     assert state["current_agent_id"] == "ross"
     kept = client.get("/watch/state", params={"day_id": legacy["day_id"]}).json()
@@ -124,7 +133,7 @@ def test_turn_count_is_stored_and_old_canvases_keep_theirs(client, monkeypatch):
 
 def test_solo_turns_advance_without_a_note_gate_and_only_ross_is_woken(client, monkeypatch):
     monkeypatch.setenv("TILE_NOTE_GATE_SECONDS", "75")
-    monkeypatch.setenv("TILE_TURNS", "3")
+    monkeypatch.setenv("TILE_SOLO_WINDOW_SECONDS", "1000")
     monkeypatch.setenv("CRON_SECRET", "cron-secret")
     seen = install_poster(monkeypatch)
     set_hook(client, "ross", ["design_needed"])
@@ -152,6 +161,7 @@ def test_solo_turns_advance_without_a_note_gate_and_only_ross_is_woken(client, m
         json={"type": "paint", "pixels": [{"x": 0, "y": 0, "color": 1}]},
     )
     assert denied.status_code == 403
+    assert denied.json()["error"] == "retired_seat"
     veto = client.post("/agent/veto", headers=auth("ross"), json={"slice": 0, "reason": "no"})
     assert veto.status_code == 409
     assert veto.json()["error"] == "solo_canvas"
@@ -194,8 +204,8 @@ def test_ross_overwrites_his_own_pixels_inside_the_budget(client, monkeypatch):
     assert cells(client, day_id, 4, 4, 2, 1) == [9, 8]
 
 
-def test_finish_locks_before_the_last_turn(client, monkeypatch):
-    monkeypatch.setenv("TILE_TURNS", "5")
+def test_finish_locks_before_the_window_ends(client, monkeypatch):
+    monkeypatch.setenv("TILE_SOLO_WINDOW_SECONDS", "3600")
     monkeypatch.setenv("CRON_SECRET", "cron-secret")
     seen = install_poster(monkeypatch)
     open_design(client)
@@ -215,8 +225,9 @@ def test_finish_locks_before_the_last_turn(client, monkeypatch):
     assert state["status"] == "locked"
     assert state["slices"][0]["state"] == "done"
     assert state["slices"][1]["state"] == "done"
-    assert state["slices"][2]["state"] == "skipped"
+    assert len(state["slices"]) == 2
     assert state["turn"] is None
+    assert state["seconds_left_canvas"] == 0 or state["status"] == "locked"
     late = client.post(
         "/agent/act",
         headers=auth("ross"),

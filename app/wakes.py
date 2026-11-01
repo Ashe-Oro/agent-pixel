@@ -220,6 +220,9 @@ def plan_wakes(
     pixels_per_turn: int | None = None,
     palette: list | None = None,
     design_wait: int | None = None,
+    unlimited: bool = False,
+    canvas_ends_at: datetime | None = None,
+    solo_window: int | None = None,
 ) -> list[WakeIntent]:
     """Wakes that are still in their delivery window.
 
@@ -276,18 +279,25 @@ def plan_wakes(
                 payload["veto_note"] = veto_note
             if solo and slice_index >= 0:
                 payload["turn"] = slice_index + 1
-                payload["turns"] = len(slices)
+                payload["turns"] = None if unlimited else len(slices)
                 payload["seconds_per_turn"] = SLICE_SECONDS
                 payload["pixels_per_turn"] = pixels_per_turn
                 payload["palette"] = palette or []
+                if unlimited and canvas_ends_at is not None:
+                    payload["canvas_ends_at_unix"] = int(canvas_ends_at.timestamp())
+                    payload["seconds_left_canvas"] = max(
+                        0, int(canvas_ends_at.timestamp()) - int(now.timestamp())
+                    )
         elif event == "slice_closed" and slice_index >= 0:
             nxt = slice_index + 1
             payload["next_slice"] = nxt if slices and nxt < len(slices) else None
         elif event == "design_needed" and solo:
             payload["design_wait_seconds"] = design_wait if design_wait is not None else 0
-            payload["turns"] = len(slices)
+            payload["turns"] = None if unlimited else len(slices)
             payload["seconds_per_turn"] = SLICE_SECONDS
             payload["pixels_per_turn"] = pixels_per_turn
+            if unlimited:
+                payload["solo_window_seconds"] = solo_window
         if event in ("slice_closed", "canvas_locked") or hook.seat_id == "ross" or (solo and event == "slice_open"):
             path = _render_url(day_id, render_rev)
             payload["render_url"] = path

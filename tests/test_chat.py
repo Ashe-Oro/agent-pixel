@@ -18,13 +18,13 @@ def test_chat_post_list_and_does_not_spend_a_slice(client):
 
     posted = client.post(
         "/watch/chat",
-        headers=auth("claude"),
+        headers=auth("design"),
         json={"text": "  I'll take the left pines.\nKeep the night sky.  "},
     )
     assert posted.status_code == 200, posted.text
     message = posted.json()["message"]
-    assert message["agent_id"] == "claude"
-    assert message["display_name"] == "Claude"
+    assert message["agent_id"] == "design"
+    assert message["display_name"] == "Design"
     assert message["text"] == "I'll take the left pines. Keep the night sky."
     assert message["time_label"].endswith("AM")
     assert isinstance(message["created_at_unix"], int)
@@ -43,7 +43,7 @@ def test_chat_post_list_and_does_not_spend_a_slice(client):
 
     too_soon = client.post(
         "/watch/chat",
-        headers={"X-Seat-Token": "seat-claude"},
+        headers=auth("design"),
         json={"text": "second too soon"},
     )
     assert too_soon.status_code == 429
@@ -60,7 +60,7 @@ def test_chat_post_list_and_does_not_spend_a_slice(client):
 
     grok = client.post(
         "/watch/chat",
-        headers=auth("grok-artist"),
+        headers=auth("ross"),
         json={"text": "I'll rim the cabin."},
     )
     assert grok.status_code == 200, grok.text
@@ -71,17 +71,17 @@ def test_chat_post_list_and_does_not_spend_a_slice(client):
         "Sky stays night blue.",
         "I'll rim the cabin.",
     ]
-    assert listed["messages"][0]["display_name"] == "Claude"
+    assert listed["messages"][0]["display_name"] == "Design"
     assert listed["messages"][2]["time_label"]
     state = client.get("/watch/state").json()
     assert [item["id"] for item in state["chat"]] == [item["id"] for item in listed["messages"]]
 
-    blank = client.post("/watch/chat", headers=auth("openai"), json={"text": "   "})
+    blank = client.post("/watch/chat", headers=auth("ross"), json={"text": "   "})
     assert blank.status_code == 400
     assert blank.json()["error"] == "bad_chat"
     huge = client.post(
         "/watch/chat",
-        headers=auth("openai"),
+        headers=auth("ross"),
         json={"text": "x" * (CHAT_MAX_CHARS + 1)},
     )
     assert huge.status_code == 400
@@ -100,23 +100,23 @@ def test_chat_cap_stays_on_its_day(client):
     for _ in range(CHAT_PER_AGENT_DAY):
         store.conn.execute(
             "INSERT INTO chat (day_id, agent_id, body, created_at) VALUES (?, ?, ?, ?)",
-            (opened["day_id"], "claude", "note", stamp),
+            (opened["day_id"], "design", "note", stamp),
         )
     store.conn.commit()
 
-    capped = client.post("/watch/chat", headers=auth("claude"), json={"text": "one more"})
+    capped = client.post("/watch/chat", headers=auth("design"), json={"text": "one more"})
     assert capped.status_code == 429
     assert capped.json()["error"] == "chat_limit"
-    other = client.post("/watch/chat", headers=auth("grok-artist"), json={"text": "still room"})
+    other = client.post("/watch/chat", headers=auth("ross"), json={"text": "still room"})
     assert other.status_code == 200, other.text
 
     pin(client, "2026-10-29T08:00:00")
-    missing = client.post("/watch/chat", headers=auth("claude"), json={"text": "tomorrow"})
+    missing = client.post("/watch/chat", headers=auth("ross"), json={"text": "tomorrow"})
     assert missing.status_code == 409
     assert missing.json()["error"] == "no_day"
     old = client.get("/watch/chat", params={"day_id": opened["day_id"]}).json()
     assert old["messages"][-1]["text"] == "still room"
-    assert old["messages"][-1]["display_name"] == "Grok Artist"
+    assert old["messages"][-1]["display_name"] == "Ross"
     today = client.get("/watch/chat").json()
     assert today["day_id"] is None
     assert today["messages"] == []

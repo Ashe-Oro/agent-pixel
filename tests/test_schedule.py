@@ -17,44 +17,36 @@ from app.schedule import (
     rotate,
     round_on_slice,
     slice_window,
+    solo_window_seconds,
     tile_rounds,
-    tile_turns,
     turn_pixel_budget,
     walk_session,
+    walk_timed_solo,
 )
 
 
-def test_default_turns_cover_eight_to_nine_thirty():
-    assert tile_turns() == 30
-    assert configured_slice_count() == 30
+def test_new_canvas_is_unlimited_and_the_window_is_two_hours():
+    assert configured_slice_count() == 0
+    assert solo_window_seconds() == 7200
     assert turn_pixel_budget() == 16384
     day = date(2026, 10, 28)
     start, lock = day_bounds(day)
     assert label_hhmm(start) == "08:00"
-    assert label_hhmm(lock) == "09:30"
-    assert lock_label() == "09:30"
-    first_begin, first_end = slice_window(day, 0)
-    last_begin, last_end = slice_window(day, 29)
-    assert first_begin == start
-    assert label_hhmm(first_end) == "08:03"
-    assert label_hhmm(last_begin) == "09:27"
-    assert last_end == lock
+    assert label_hhmm(lock) == "08:00"
+    assert (lock - start) == timedelta(days=1)
+    assert lock_label() == "10:00"
     order = ["ross"]
-    sequence = [artist_on_slice(order, index) for index in range(30)]
-    assert sequence == ["ross"] * 30
-    assert [round_on_slice(index, 1) for index in (0, 11, 29)] == [1, 12, 30]
+    assert [artist_on_slice(order, index) for index in range(4)] == ["ross"] * 4
     roster = ["claude", "grok-artist", "openai"]
     assert [artist_on_slice(roster, index) for index in range(6)] == roster * 2
     assert [round_on_slice(index) for index in (0, 3, 15, 17)] == [1, 2, 6, 6]
 
 
-def test_position_boundaries():
+def test_position_stays_open_through_the_calendar_day():
     assert position(parse_ny_local("2026-10-28T07:59:59")) == ("before", None)
-    assert position(parse_ny_local("2026-10-28T08:00:00")) == ("during", 0)
-    assert position(parse_ny_local("2026-10-28T08:02:59")) == ("during", 0)
-    assert position(parse_ny_local("2026-10-28T08:03:00")) == ("during", 1)
-    assert position(parse_ny_local("2026-10-28T09:29:59")) == ("during", 29)
-    assert position(parse_ny_local("2026-10-28T09:30:00")) == ("after", None)
+    assert position(parse_ny_local("2026-10-28T08:00:00")) == ("during", None)
+    assert position(parse_ny_local("2026-10-28T15:00:00")) == ("during", None)
+    assert position(parse_ny_local("2026-10-29T07:59:59")) == ("before", None)
 
 
 def test_twelve_slice_history_still_locks_at_eight_thirty_six():
@@ -73,26 +65,46 @@ def test_twelve_slice_history_still_locks_at_eight_thirty_six():
     assert position(parse_ny_local("2026-10-28T08:36:00"), slice_count=12) == ("after", None)
 
 
-def test_tile_turns_respects_bounds(monkeypatch):
-    monkeypatch.setenv("TILE_TURNS", "2")
-    assert tile_turns() == 2
-    assert configured_slice_count() == 2
-    assert lock_label() == "08:06"
-    monkeypatch.setenv("TILE_TURNS", "90")
-    assert tile_turns() == 90
-    assert configured_slice_count() == 90
-    for raw in ("0", "91", "-3", "nope", "", "6.5"):
-        monkeypatch.setenv("TILE_TURNS", raw)
-        assert tile_turns() == 30, raw
-        assert configured_slice_count() == 30
+def test_solo_window_respects_bounds(monkeypatch):
+    monkeypatch.setenv("TILE_SOLO_WINDOW_SECONDS", "600")
+    assert solo_window_seconds() == 600
+    assert lock_label() == "08:10"
+    for raw in ("0", "-3", "nope", "", "6.5"):
+        monkeypatch.setenv("TILE_SOLO_WINDOW_SECONDS", raw)
+        assert solo_window_seconds() == 7200, raw
     monkeypatch.setenv("TILE_PIXELS_PER_TURN", "4096")
     assert turn_pixel_budget() == 4096
     monkeypatch.setenv("TILE_PIXELS_PER_TURN", "0")
     assert turn_pixel_budget() == 16384
-    # TILE_ROUNDS still parses for older notes. It does not size a new canvas.
     monkeypatch.setenv("TILE_ROUNDS", "2")
     assert tile_rounds() == 2
-    assert configured_slice_count() == 30
+    assert configured_slice_count() == 0
+
+
+def test_last_turn_is_clamped_to_the_window():
+    start = parse_ny_local("2026-10-28T08:00:00")
+    end = start + timedelta(seconds=200)
+    early = walk_timed_solo(start, {}, parse_ny_local("2026-10-28T08:00:30"), end)
+    assert early.phase == "during"
+    assert early.index == 0
+    assert early.deadline == start + timedelta(seconds=180)
+    late = walk_timed_solo(start, {}, parse_ny_local("2026-10-28T08:03:10"), end)
+    assert late.phase == "during"
+    assert late.index == 1
+    assert late.deadline == end
+    assert late.slices[0].missed is True
+    locked = walk_timed_solo(start, {}, end, end)
+    assert locked.phase == "after"
+    assert locked.slices[-1].deadline == end
+    finished = walk_timed_solo(
+        start,
+        {0: parse_ny_local("2026-10-28T08:00:20")},
+        parse_ny_local("2026-10-28T08:01:00"),
+        end,
+        done_index=0,
+    )
+    assert finished.phase == "after"
+    assert len(finished.slices) == 1
 
 
 def test_review_gate_holds_until_a_note_or_the_timeout():
@@ -102,7 +114,7 @@ def test_review_gate_holds_until_a_note_or_the_timeout():
     assert held.phase == "holding"
     assert held.holding_index == 1
     assert held.index is None
-    assert len(held.slices) == configured_slice_count()
+    assert len(held.slices) == 18
     opened = walk_session(start, acted, parse_ny_local("2026-10-28T08:01:25"), gate_seconds=75)
     assert opened.phase == "during"
     assert opened.index == 1

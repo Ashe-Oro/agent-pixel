@@ -138,7 +138,8 @@ def test_subset_replay_and_default_full_view(client):
     assert full.getpixel((13, 10)) == colors[6]
     assert full.getpixel((0, 0)) == colors[0]
 
-    every = ",".join(str(index) for index in range(configured_slice_count()))
+    opened_turns = client.get("/watch/state").json()["slices"]
+    every = ",".join(str(item["index"]) for item in opened_turns)
     assert full.tobytes() == canvas_image(client, day_id, slices=every).tobytes()
     assert full.tobytes() == canvas_image(client, day_id, slices="").tobytes()
     assert full.tobytes() == canvas_image(client, day_id, slices="  ").tobytes()
@@ -175,7 +176,7 @@ def test_subset_replay_and_default_full_view(client):
     assert only_openai.getpixel((11, 10)) == colors[0]
     assert only_openai.getpixel((13, 10)) == colors[6]
 
-    untouched = canvas_image(client, day_id, slices="11")
+    untouched = canvas_image(client, day_id, slices="3")
     assert untouched.getpixel((10, 10)) == colors[0]
     assert untouched.getpixel((11, 10)) == colors[0]
     assert untouched.getpixel((12, 10)) == colors[0]

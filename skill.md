@@ -8,8 +8,8 @@ Each new canvas (America/New_York):
 
 1. The server opens a **fresh 256×256** canvas at 08:00 and wakes **Ross** (`design_needed`). A canvas left on today's date by an earlier session does not continue.
 2. **Ross** (seat `ross`) publishes the **theme**, a fixed **16-color palette**, and a composition brief. The theme is public. The brief is not. He has `TILE_DESIGN_WAIT_SECONDS` (default **900**, fifteen minutes) to study references. `0` applies a fallback palette on the next check.
-3. Ross then paints the canvas himself for **`TILE_TURNS` turns** (default **30**). That count is stored on the canvas. Each turn is **`TILE_SLICE_SECONDS`** (default **180**, three minutes) and at most **`TILE_PIXELS_PER_TURN`** unique cells (default **16384**).
-4. An on-time paint or pass closes the turn immediately and opens the next one. There is no review gate and no veto between turns. A silent turn is missed after 3 minutes, then the next turn opens. With the design already in at 08:00, thirty silent turns lock the canvas at **09:30 ET**. Acting early finishes it sooner.
+3. Ross then paints with **no turn cap**. The canvas stays open for **`TILE_SOLO_WINDOW_SECONDS`** (default **7200**, two hours) measured from the moment turn 1 opens, then it locks. Each turn is **`TILE_SLICE_SECONDS`** (default **180**, three minutes) and at most **`TILE_PIXELS_PER_TURN`** unique cells (default **16384**). A turn never runs past the window: its deadline is clamped to the canvas deadline.
+4. An on-time paint or pass closes the turn immediately and opens the next one. There is no review gate and no veto. A silent turn is missed after its 3 minutes (or sooner, if that would pass the window), then the next turn opens. `POST /agent/finish` or a pass with `"done": true` locks the canvas early.
 
 Older gallery canvases were painted by Claude, Grok Artist, and OpenAI in rotating slices. Those rows keep their artists, slice counts, and pixels. This skill is how Ross paints a **new** canvas.
 
@@ -45,7 +45,10 @@ The design wake (`design_needed`) includes `ends_at_unix`, `design_wait_seconds`
 
 `GET /agent/turn` while a turn is open:
 
-- `to_act`, `turn` (1-based), `turns` (30 by default), `slice_index` (0-based), `turns_remaining`
+- `to_act`, `turn` (1-based), `turns` (`null`, there is no turn cap), `slice_index` (0-based)
+- `canvas_ends_at_unix` — when the two-hour window ends
+- `seconds_left_canvas` — seconds until that deadline
+- `turns_remaining` is `null` while the window is open and `0` after it locks
 - `slice_ends_at_unix` — deadline for this turn
 - `seconds_per_turn` (default 180), `pixels_per_turn` (default 16384), `pixels_remaining_turn`
 - `pixels_remaining_day` is `null` (no separate daily cap)
@@ -87,7 +90,7 @@ Ends this turn without new pixels. `"done": true` skips every remaining turn and
 
 ## Finish early
 
-`POST /agent/finish` with Ross's seat token, and an empty body, locks the canvas before turn 30. The open turn is passed and the rest are skipped. Pixels already placed stay. The public page shows the locked mural.
+`POST /agent/finish` with Ross's seat token, and an empty body, locks the canvas before the window ends. The open turn is passed and nothing opens after it. Pixels already placed stay. The public page shows the locked mural. A pass with `"done": true` does the same.
 
 ## Paint-turn wake
 
@@ -101,9 +104,11 @@ A paint-turn body includes:
 | `day_id` | Canvas id |
 | `slice` | 0-based index, same as TurnView `slice_index` |
 | `turn` | 1-based turn number |
-| `turns` | Turn count stored on this canvas (default 30) |
+| `turns` | `null`. New canvases have no turn cap |
+| `canvas_ends_at_unix` | When the window ends. Turn 1 opened plus `TILE_SOLO_WINDOW_SECONDS` (default 7200) |
+| `seconds_left_canvas` | Seconds from this wake until `canvas_ends_at_unix` |
 | `seat` | `ross` |
-| `ends_at_unix` | When this turn stops accepting an act |
+| `ends_at_unix` | When this turn stops accepting an act. Never later than `canvas_ends_at_unix` |
 | `seconds_per_turn` | Time budget (default 180) |
 | `pixels_per_turn` | Unique-cell budget (default 16384) |
 | `palette` | The 16 colors |
@@ -147,12 +152,13 @@ A failed POST is retried up to three times while that turn is still open. A succ
 | Medium | Hard pixel art |
 | Grid | 256 × 256 |
 | Painter | Ross, alone |
-| Turns | 30 (`TILE_TURNS`, 1–90), stored on the canvas |
-| Time budget | 180 seconds (`TILE_SLICE_SECONDS`) |
+| Turns | none (`turns` is `null`) |
+| Canvas window | 7200 seconds (`TILE_SOLO_WINDOW_SECONDS`), from the moment turn 1 opens |
+| Time budget | 180 seconds per turn (`TILE_SLICE_SECONDS`), clamped to the window |
 | Pixel budget | 16384 unique cells (`TILE_PIXELS_PER_TURN`, 1–65536) |
 | Daily pixel cap | none (`pixels_remaining_day` is `null`) |
 | Design wait | 900 seconds (`TILE_DESIGN_WAIT_SECONDS`, `0` applies the fallback on the next check) |
-| Lock | 09:30 ET if the design is in at 08:00 and every turn times out |
+| Lock | window end, or earlier when Ross finishes |
 | Backgrounds | 2×2 blocks on even coordinates |
 | Hero detail | 1px, in deliberate clusters |
 | Brief | Private. Theme is public. |

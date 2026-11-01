@@ -59,7 +59,7 @@ def test_mixed_history_does_not_confuse_the_next_morning(client, monkeypatch):
     assert evening.json()["day"]["day_id"] == sixteen
     assert evening.json()["day"]["archived"] is False
     watch = client.get("/watch/state").json()
-    turn = client.get("/agent/turn", headers=auth("claude")).json()
+    turn = client.get("/agent/turn", headers=auth("ross")).json()
     assert watch["day_id"] == sixteen
     assert watch["status"] == "locked"
     assert turn["day_id"] == sixteen
@@ -114,10 +114,10 @@ def test_morning_waits_until_a_running_one_off_locks(client, monkeypatch):
     assert first.json()["phase"] == "slice"
     assert client.get("/cron/tick", headers=CRON).json()["day"]["day_id"] == one_off
     assert client.get("/watch/state").json()["day_id"] == one_off
-    assert client.get("/agent/turn", headers=auth("claude")).json()["day_id"] == one_off
+    assert client.get("/agent/turn", headers=auth("ross")).json()["day_id"] == one_off
 
-    # 07:50 plus thirty 3-minute turns is 09:20.
-    pin(client, "2026-10-30T09:20:00")
+    # 07:50 plus the two-hour window is 09:50.
+    pin(client, "2026-10-30T09:50:00")
     started = client.get("/cron/tick", headers=CRON)
     assert started.status_code == 200, started.text
     assert started.json()["phase"] == "awaiting_design"
@@ -125,5 +125,6 @@ def test_morning_waits_until_a_running_one_off_locks(client, monkeypatch):
     assert new_id != one_off
     assert client.get("/cron/tick", headers=CRON).json()["day"]["day_id"] == new_id
     assert client.get("/watch/state").json()["day_id"] == new_id
-    assert client.get("/agent/turn", headers=auth("claude")).json()["day_id"] == new_id
-    assert client.get("/agent/turn", headers=auth("claude")).json()["to_act"] is False
+    assert client.get("/agent/turn", headers=auth("ross")).json()["day_id"] == new_id
+    assert client.get("/agent/turn", headers=auth("ross")).json()["to_act"] is True
+    assert client.get("/agent/turn", headers=auth("ross")).json()["reason"] == "design_needed"

@@ -31,6 +31,9 @@ class Settings:
     @classmethod
     def from_env(cls) -> Settings:
         seats: dict[str, str] = {}
+        # Claude, Grok, and OpenAI are retired. The tokens stay readable so an
+        # older roster canvas can still be painted if those variables are set.
+        # New canvases reject those seats. Do not add them to setup docs.
         for agent, env_name in (
             ("design", "TILE_SEAT_DESIGN"),
             ("ross", "TILE_SEAT_ROSS"),

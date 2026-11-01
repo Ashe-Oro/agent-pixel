@@ -58,7 +58,9 @@ def test_cron_waits_for_design_then_times_out(client, monkeypatch):
     assert "brief" not in wake
     assert "director_note" not in wake
     assert FALLBACK_SNIPPET not in json.dumps(wake)
-    assert client.get("/agent/turn", headers=auth("claude")).json()["to_act"] is False
+    retired = client.get("/agent/turn", headers=auth("claude"))
+    assert retired.status_code == 403
+    assert retired.json()["error"] == "retired_seat"
     desk = client.get("/agent/turn", headers={"X-Seat-Token": "seat-ross"})
     assert desk.status_code == 200, desk.text
     assert desk.json()["reason"] == "design_needed"
@@ -81,12 +83,14 @@ def test_cron_waits_for_design_then_times_out(client, monkeypatch):
     assert started.json()["current_agent_id"] == "ross"
     assert started.json()["day"]["theme"] == "Open canvas"
     assert FALLBACK_SNIPPET not in started.text
-    assert client.get("/agent/turn", headers=auth("claude")).json()["to_act"] is False
+    assert client.get("/agent/turn", headers=auth("claude")).status_code == 403
     turn = client.get("/agent/turn", headers=auth("ross")).json()
     assert turn["to_act"] is True
     assert turn["slice_index"] == 0
     assert turn["turn"] == 1
-    assert turn["turns"] == 30
+    assert turn["turns"] is None
+    assert turn["canvas_ends_at_unix"]
+    assert turn["seconds_left_canvas"] > 0
     assert FALLBACK_SNIPPET in turn["brief"]
     assert turn["director_note"] is None
     _assert_private(client, day_id, FALLBACK_SNIPPET, turn["brief"])
@@ -94,7 +98,9 @@ def test_cron_waits_for_design_then_times_out(client, monkeypatch):
     assert [item["event"] for item in payloads(seen)] == ["design_needed", "slice_open"]
     assert payloads(seen)[1]["seat"] == "ross"
     assert payloads(seen)[1]["turn"] == 1
-    assert payloads(seen)[1]["turns"] == 30
+    assert payloads(seen)[1]["turns"] is None
+    assert payloads(seen)[1]["canvas_ends_at_unix"] == turn["canvas_ends_at_unix"]
+    assert "seconds_left_canvas" in payloads(seen)[1]
     assert "claude" not in [item["seat"] for item in payloads(seen)]
     assert payloads(seen)[1]["brief"] == turn["brief"]
     assert payloads(seen)[1]["director_note"] is None
