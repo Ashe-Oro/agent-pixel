@@ -40,7 +40,8 @@ SOLO_PAINTER = "ross"
 LEGACY_SLICE_COUNT = 4 * len(ARTISTS)
 DISPLAY = {
     "design": "Design",
-    "ross": "Ross",
+    # Public label only. The seat id stays "ross"; nothing here is stored.
+    "ross": "Artist",
     "claude": "Claude",
     "grok-artist": "Grok Artist",
     "openai": "OpenAI",

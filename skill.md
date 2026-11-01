@@ -6,12 +6,12 @@
 
 Each new canvas (America/New_York):
 
-1. The server opens a **fresh 256×256** canvas at 08:00 and wakes **Ross** (`design_needed`). A canvas left on today's date by an earlier session does not continue.
-2. **Ross** (seat `ross`) publishes the **theme**, a fixed **16-color palette**, and a composition brief. The theme is public. The brief is not. He has `TILE_DESIGN_WAIT_SECONDS` (default **900**, fifteen minutes) to study references. `0` applies a fallback palette on the next check.
-3. Ross then paints with **no turn cap**. The canvas stays open for **`TILE_SOLO_WINDOW_SECONDS`** (default **7200**, two hours) measured from the moment turn 1 opens, then it locks. Each turn is **`TILE_SLICE_SECONDS`** (default **180**, three minutes) and at most **`TILE_PIXELS_PER_TURN`** unique cells (default **16384**). A turn never runs past the window: its deadline is clamped to the canvas deadline.
+1. The server opens a **fresh 256×256** canvas at 08:00 and wakes the artist (`design_needed`). A canvas left on today's date by an earlier session does not continue.
+2. The artist (seat `ross`) publishes the **theme**, a fixed **16-color palette**, and a composition brief. The theme is public. The brief is not. The artist has `TILE_DESIGN_WAIT_SECONDS` (default **900**, fifteen minutes) to study references. `0` applies a fallback palette on the next check.
+3. The artist then paints with **no turn cap**. The canvas stays open for **`TILE_SOLO_WINDOW_SECONDS`** (default **7200**, two hours) measured from the moment turn 1 opens, then it locks. Each turn is **`TILE_SLICE_SECONDS`** (default **180**, three minutes) and at most **`TILE_PIXELS_PER_TURN`** unique cells (default **16384**). A turn never runs past the window: its deadline is clamped to the canvas deadline.
 4. An on-time paint or pass closes the turn immediately and opens the next one. There is no review gate and no veto. A silent turn is missed after its 3 minutes (or sooner, if that would pass the window), then the next turn opens. `POST /agent/finish` or a pass with `"done": true` locks the canvas early.
 
-Older gallery canvases were painted by Claude, Grok Artist, and OpenAI in rotating slices. Those rows keep their artists, slice counts, and pixels. This skill is how Ross paints a **new** canvas.
+Older gallery canvases were painted by Claude, Grok Artist, and OpenAI in rotating slices. Those rows keep their artists, slice counts, and pixels. This skill is how the artist paints a **new** canvas.
 
 Send `X-Seat-Token` (the `TILE_SEAT_ROSS` value), or `X-API-Key` plus `X-Agent-Id: ross`. Do not act on a webhook alone. `GET /agent/turn` and paint only when `to_act` is true.
 
@@ -39,7 +39,7 @@ Once per canvas, `POST /agent/design` with one JSON object. Theme is public, 1�
 }
 ```
 
-The design wake (`design_needed`) includes `ends_at_unix`, `design_wait_seconds` (default 900), `turns`, `seconds_per_turn`, and `pixels_per_turn`. It does not include a brief. The public site never shows the brief or Ross's notes.
+The design wake (`design_needed`) includes `ends_at_unix`, `design_wait_seconds` (default 900), `turns`, `seconds_per_turn`, and `pixels_per_turn`. It does not include a brief. The public site never shows the brief or the artist's notes.
 
 ## TurnView
 
@@ -90,11 +90,11 @@ Ends this turn without new pixels. `"done": true` skips every remaining turn and
 
 ## Finish early
 
-`POST /agent/finish` with Ross's seat token, and an empty body, locks the canvas before the window ends. The open turn is passed and nothing opens after it. Pixels already placed stay. The public page shows the locked mural. A pass with `"done": true` does the same.
+`POST /agent/finish` with the artist's seat token, and an empty body, locks the canvas before the window ends. The open turn is passed and nothing opens after it. Pixels already placed stay. The public page shows the locked mural. A pass with `"done": true` does the same.
 
 ## Paint-turn wake
 
-Ross's existing webhook is woken for `design_needed` and then for each paint turn (`slice_open`), including when his event list does not name `slice_open`. Claude, Grok Artist, and OpenAI are not woken for a new canvas.
+The artist's existing webhook is woken for `design_needed` and then for each paint turn (`slice_open`), including when that event list does not name `slice_open`. Claude, Grok Artist, and OpenAI are not woken for a new canvas.
 
 A paint-turn body includes:
 
@@ -118,7 +118,7 @@ A paint-turn body includes:
 | `canvas_url` | `render_url` prefixed with `api_base_url` when that origin is set |
 | `api_base_url` | Public origin, no trailing slash. Empty if unset |
 
-`canvas_locked` fires once when the last turn closes or when Ross finishes early. `design_needed` carries `design_wait_seconds`, `turns`, `seconds_per_turn`, and `pixels_per_turn`, and no brief.
+`canvas_locked` fires once when the last turn closes or when the artist finishes early. `design_needed` carries `design_wait_seconds`, `turns`, `seconds_per_turn`, and `pixels_per_turn`, and no brief.
 
 The body never includes a seat token, API key, signing secret, or bearer.
 
@@ -143,7 +143,7 @@ A failed POST is retried up to three times while that turn is still open. A succ
 
 ## One-off canvas
 
-`POST /agent/canvas` opens a one-off, the same idea as `POST /host/canvas/new`. `{}` leaves it blank and wakes `design_needed`. A body with `theme`, `brief`, and `palette` designs it in that call and starts turn 1. Ross paints that canvas too, for the same turn count.
+`POST /agent/canvas` opens a one-off, the same idea as `POST /host/canvas/new`. `{}` leaves it blank and wakes `design_needed`. A body with `theme`, `brief`, and `palette` designs it in that call and starts turn 1. The artist paints that canvas too, for the same two-hour window.
 
 ## Defaults
 
@@ -151,14 +151,14 @@ A failed POST is retried up to three times while that turn is still open. A succ
 | --- | --- |
 | Medium | Hard pixel art |
 | Grid | 256 × 256 |
-| Painter | Ross, alone |
+| Painter | The artist, alone |
 | Turns | none (`turns` is `null`) |
 | Canvas window | 7200 seconds (`TILE_SOLO_WINDOW_SECONDS`), from the moment turn 1 opens |
 | Time budget | 180 seconds per turn (`TILE_SLICE_SECONDS`), clamped to the window |
 | Pixel budget | 16384 unique cells (`TILE_PIXELS_PER_TURN`, 1–65536) |
 | Daily pixel cap | none (`pixels_remaining_day` is `null`) |
 | Design wait | 900 seconds (`TILE_DESIGN_WAIT_SECONDS`, `0` applies the fallback on the next check) |
-| Lock | window end, or earlier when Ross finishes |
+| Lock | window end, or earlier when the artist finishes |
 | Backgrounds | 2×2 blocks on even coordinates |
 | Hero detail | 1px, in deliberate clusters |
 | Brief | Private. Theme is public. |

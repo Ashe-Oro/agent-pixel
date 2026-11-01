@@ -68,7 +68,8 @@ def test_cron_waits_for_design_then_times_out(client, monkeypatch):
     state = client.get("/watch/state").json()
     assert state["status"] == "awaiting_design"
     assert state["theme"] is None
-    assert "Waiting for Ross" in state["message"]
+    assert "Waiting for the artist" in state["message"]
+    assert "Ross" not in state["message"]
 
     pin(client, "2026-10-28T08:01:59")
     still = client.get("/cron/tick", headers=CRON)
@@ -175,7 +176,8 @@ def test_gate_opens_on_note_without_a_second_wake(client, monkeypatch):
     assert state["current_agent_id"] is None
     assert state["slices"][0]["state"] == "done"
     assert state["slices"][1]["state"] == "review"
-    assert "Waiting for the art director" in state["message"]
+    assert "Waiting before the next slice" in state["message"]
+    assert "Ross" not in state["message"]
     assert [item["seat"] for item in payloads(seen)] == ["claude", "ross"]
     closed = payloads(seen)[1]
     assert closed["event"] == "slice_closed"

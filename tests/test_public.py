@@ -16,7 +16,9 @@ def test_skill_matches_contract(client):
     assert "09:30" not in body
     assert "08:54" not in body
     assert "3 minutes" in body
-    assert "Ross" in body
+    assert "Ross" not in body
+    assert "TILE_SEAT_ROSS" in body
+    assert "seat `ross`" in body
     assert "16384" in body
     assert "TILE_SOLO_WINDOW_SECONDS" in body
     assert "canvas_ends_at_unix" in body
@@ -41,7 +43,13 @@ def test_watch_page_uses_crisp_pixels(client):
     assert "2 hours" in page
     assert "90 minutes" not in page
     assert "54 minutes" not in page
-    assert "Ross paints" in page
+    assert "An AI artist paints this canvas" in page
+    assert "The artist" in page
+    assert "Select all shows every slice" in page
+    assert "Ross" not in page
+    schema = client.get("/openapi.json")
+    assert schema.status_code == 200
+    assert "Ross" not in schema.text
     assert "timeLeft" in page
     assert "m left" in page
     assert "turnLine" in page

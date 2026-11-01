@@ -46,7 +46,7 @@ def test_new_canvas_is_thirty_ross_turns(client, monkeypatch):
     assert state["turns"] is None
     assert len(state["slices"]) == 1
     assert state["current_agent_id"] == "ross"
-    assert state["current_display_name"] == "Ross"
+    assert state["current_display_name"] == "Artist"
     assert [item["agent_id"] for item in state["artists"]] == ["ross"]
     assert state["schedule"]["locks"] == "10:00"
     assert state["canvas_ends_at_unix"]
@@ -127,7 +127,7 @@ def test_turn_count_is_stored_and_old_canvases_keep_theirs(client, monkeypatch):
     assert kept["artists"][0]["agent_id"] == "claude"
     gallery = client.get("/watch/gallery").json()["canvases"]
     by_id = {item["day_id"]: item for item in gallery}
-    assert by_id[state["day_id"]]["painters"] == ["Ross"]
+    assert by_id[state["day_id"]]["painters"] == ["Artist"]
     assert by_id[legacy["day_id"]]["painters"] == ["Claude", "Grok Artist", "OpenAI"]
 
 
