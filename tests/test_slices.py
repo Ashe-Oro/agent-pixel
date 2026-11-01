@@ -106,7 +106,7 @@ def test_subset_replay_and_default_full_view(client):
     day_id = opened["day_id"]
     paint(
         client,
-        "claude",
+        "ross",
         [
             {"x": 10, "y": 10, "color": 1},
             {"x": 11, "y": 10, "color": 2},
@@ -114,7 +114,7 @@ def test_subset_replay_and_default_full_view(client):
     )
     paint(
         client,
-        "grok-artist",
+        "ross",
         [
             {"x": 10, "y": 10, "color": 4},
             {"x": 12, "y": 10, "color": 5},
@@ -122,7 +122,7 @@ def test_subset_replay_and_default_full_view(client):
     )
     paint(
         client,
-        "openai",
+        "ross",
         [
             {"x": 10, "y": 10, "color": 0},
             {"x": 13, "y": 10, "color": 6},
@@ -195,7 +195,7 @@ def test_subset_replay_and_default_full_view(client):
     assert cells(client, day_id, 12, 10) == [5]
     assert cells(client, day_id, 13, 10) == [6]
 
-    for bad in ("18", "nope", "-1", "0,1,", "0,99"):
+    for bad in ("30", "nope", "-1", "0,1,", "0,99"):
         response = client.get("/watch/canvas.png", params={"day_id": day_id, "slices": bad})
         assert response.status_code == 400, bad
         assert response.json()["error"] == "bad_slices"
@@ -211,9 +211,9 @@ def test_subset_replay_and_default_full_view(client):
 def test_passed_slice_filters_to_background(client):
     opened = open_design(client, "2026-10-28T08:00:00")
     day_id = opened["day_id"]
-    passed = client.post("/agent/act", headers=auth("claude"), json={"type": "pass", "note": "yield"})
+    passed = client.post("/agent/act", headers=auth("ross"), json={"type": "pass", "note": "yield"})
     assert passed.status_code == 200, passed.text
-    paint(client, "grok-artist", [{"x": 4, "y": 4, "color": 3}])
+    paint(client, "ross", [{"x": 4, "y": 4, "color": 3}])
     colors = palette_colors(client)
 
     full = canvas_image(client, day_id)
@@ -246,7 +246,7 @@ def test_seeded_cabin_stays_on_the_full_view_only(tmp_path):
         day_id = state["day_id"]
         painted = client.post(
             "/agent/act",
-            headers=auth("claude"),
+            headers=auth("ross"),
             json={"type": "paint", "pixels": [{"x": 1, "y": 1, "color": 11}]},
         )
         assert painted.status_code == 200, painted.text

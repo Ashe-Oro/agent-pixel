@@ -32,7 +32,7 @@ def test_chat_post_list_and_does_not_spend_a_slice(client):
     assert "pixels" not in message
     assert "canvas" not in message
 
-    turn = client.get("/agent/turn", headers=auth("claude")).json()
+    turn = client.get("/agent/turn", headers=auth("ross")).json()
     assert turn["to_act"] is True
     region = client.get(
         f"/host/days/{day_id}/region",

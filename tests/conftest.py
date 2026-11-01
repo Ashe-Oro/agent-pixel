@@ -1,3 +1,4 @@
+import json
 import os
 
 os.environ["TILE_DB_PATH"] = "/tmp/tile-import-sideeffect.db"
@@ -69,3 +70,22 @@ def open_design(client, stamp: str = "2026-10-28T08:00:00"):
     response = client.post("/agent/design", json=DESIGN, headers=auth("design"))
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def open_legacy_design(client, stamp: str = "2026-10-28T08:00:00", slice_count: int = 18, order=None):
+    """Open a canvas, then restore the retired three-artist roster on that row.
+
+    New canvases are Ross alone. Tests of the review gate and veto use this
+    so an archived morning still has its old clock.
+    """
+    opened = open_design(client, stamp)
+    roster = order or ["claude", "grok-artist", "openai"]
+    client.app.state.store.conn.execute(
+        """
+        UPDATE days
+        SET artist_order_json = ?, slice_count = ?, turn_pixels = NULL
+        WHERE id = ?
+        """,
+        (json.dumps(roster), slice_count, opened["day_id"]),
+    )
+    return opened

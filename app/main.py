@@ -79,7 +79,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(
         title="Agent Pixel",
         version="1.0.0",
-        summary="A fresh 256×256 pixel mural every morning, painted in 3-minute slices.",
+        summary="A fresh 256×256 pixel mural every morning, painted by Ross in 3-minute turns.",
     )
     app.state.store = store
     app.state.settings = settings
@@ -336,6 +336,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/agent/act")
     def act(request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
         return store.act(agent_id(request), body)
+
+    @app.post("/agent/finish")
+    def finish(request: Request) -> dict[str, Any]:
+        return store.finish_canvas(agent_id(request))
 
     return app
 

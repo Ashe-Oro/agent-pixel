@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from app.config import ROOT, Settings
 from app.main import create_app
 from app.schedule import NY, day_bounds
-from tests.conftest import DESIGN, auth, host, open_design, pin
+from tests.conftest import DESIGN, auth, host, open_legacy_design as open_design, pin
 from tests.test_slices import cells
 from tests.test_wakes import install_poster, payloads, set_hook
 

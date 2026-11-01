@@ -2,7 +2,7 @@
 
 import json
 
-from tests.conftest import DESIGN, auth, host, open_design, pin
+from tests.conftest import DESIGN, auth, host, open_design, open_legacy_design, pin
 from tests.test_wakes import CRON, install_poster, payloads, set_hook
 
 BRIEF = "SECRET_BRIEF_cabin_pines_do_not_publish"
@@ -66,7 +66,7 @@ def test_cron_waits_for_design_then_times_out(client, monkeypatch):
     state = client.get("/watch/state").json()
     assert state["status"] == "awaiting_design"
     assert state["theme"] is None
-    assert "Waiting for the art director" in state["message"]
+    assert "Waiting for Ross" in state["message"]
 
     pin(client, "2026-10-28T08:01:59")
     still = client.get("/cron/tick", headers=CRON)
@@ -78,18 +78,24 @@ def test_cron_waits_for_design_then_times_out(client, monkeypatch):
     started = client.get("/cron/tick", headers=CRON)
     assert started.status_code == 200, started.text
     assert started.json()["phase"] == "slice"
-    assert started.json()["current_agent_id"] == "claude"
+    assert started.json()["current_agent_id"] == "ross"
     assert started.json()["day"]["theme"] == "Open canvas"
     assert FALLBACK_SNIPPET not in started.text
-    turn = client.get("/agent/turn", headers=auth("claude")).json()
+    assert client.get("/agent/turn", headers=auth("claude")).json()["to_act"] is False
+    turn = client.get("/agent/turn", headers=auth("ross")).json()
     assert turn["to_act"] is True
     assert turn["slice_index"] == 0
+    assert turn["turn"] == 1
+    assert turn["turns"] == 30
     assert FALLBACK_SNIPPET in turn["brief"]
     assert turn["director_note"] is None
     _assert_private(client, day_id, FALLBACK_SNIPPET, turn["brief"])
     again = client.get("/cron/tick", headers=CRON)
     assert [item["event"] for item in payloads(seen)] == ["design_needed", "slice_open"]
-    assert payloads(seen)[1]["seat"] == "claude"
+    assert payloads(seen)[1]["seat"] == "ross"
+    assert payloads(seen)[1]["turn"] == 1
+    assert payloads(seen)[1]["turns"] == 30
+    assert "claude" not in [item["seat"] for item in payloads(seen)]
     assert payloads(seen)[1]["brief"] == turn["brief"]
     assert payloads(seen)[1]["director_note"] is None
     assert again.json()["wakes"] == []
@@ -119,8 +125,9 @@ def test_ross_design_starts_slice_zero_and_stays_private(client, monkeypatch):
     state = client.get("/watch/state").json()
     assert state["status"] == "painting"
     assert state["theme"] == "Public harbor"
-    assert state["current_agent_id"] == "claude"
-    turn = client.get("/agent/turn", headers=auth("claude")).json()
+    assert state["current_agent_id"] == "ross"
+    assert state["solo"] is True
+    turn = client.get("/agent/turn", headers={"X-Seat-Token": "seat-ross"}).json()
     assert turn["to_act"] is True
     assert turn["brief"] == "y" * 4000
     assert turn["day_id"] == day_id
@@ -137,7 +144,7 @@ def test_gate_opens_on_note_without_a_second_wake(client, monkeypatch):
     monkeypatch.setenv("CRON_SECRET", "cron-secret")
     monkeypatch.setenv("TILE_PUBLIC_BASE_URL", "https://pixel.example")
     seen = install_poster(monkeypatch)
-    opened = open_design(client, "2026-10-28T08:00:00")
+    opened = open_legacy_design(client, "2026-10-28T08:00:00")
     # Replace the cozy brief with one we can hunt for on public routes.
     client.app.state.store.conn.execute(
         "UPDATE days SET brief = ? WHERE id = ?",
@@ -223,7 +230,7 @@ def test_gate_opens_on_timeout(client, monkeypatch):
     monkeypatch.setenv("TILE_NOTE_GATE_SECONDS", "75")
     monkeypatch.setenv("CRON_SECRET", "cron-secret")
     seen = install_poster(monkeypatch)
-    open_design(client, "2026-10-28T08:00:00")
+    open_legacy_design(client, "2026-10-28T08:00:00")
     set_hook(client, "grok-artist", ["slice_open"])
     set_hook(client, "ross", ["slice_closed"])
     assert client.post("/agent/act", headers=auth("claude"), json={"type": "pass"}).status_code == 200
@@ -269,7 +276,8 @@ def test_ross_canvas_and_note_are_ross_only(client, monkeypatch):
         headers=auth("ross"),
         json={"type": "pass"},
     )
-    assert paint.status_code == 403
+    assert paint.status_code == 409
+    assert paint.json()["error"] == "awaiting_design"
 
     themed = dict(DESIGN)
     themed["theme"] = "Ross one-off"

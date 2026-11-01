@@ -72,7 +72,7 @@ def test_paint_survives_a_new_instance(tmp_path, monkeypatch):
             day_id = created.json()["day_id"]
             painted = client.post(
                 "/agent/act",
-                headers=auth("claude"),
+                headers=auth("ross"),
                 json={"type": "paint", "pixels": [{"x": 4, "y": 5, "color": 3}]},
             )
             assert painted.status_code == 200, painted.text

@@ -18,27 +18,33 @@ from app.schedule import (
     round_on_slice,
     slice_window,
     tile_rounds,
+    tile_turns,
+    turn_pixel_budget,
     walk_session,
 )
 
 
-def test_default_rounds_cover_eight_to_eight_fifty_four():
-    assert tile_rounds() == 6
-    assert configured_slice_count() == 18
+def test_default_turns_cover_eight_to_nine_thirty():
+    assert tile_turns() == 30
+    assert configured_slice_count() == 30
+    assert turn_pixel_budget() == 16384
     day = date(2026, 10, 28)
     start, lock = day_bounds(day)
     assert label_hhmm(start) == "08:00"
-    assert label_hhmm(lock) == "08:54"
-    assert lock_label() == "08:54"
+    assert label_hhmm(lock) == "09:30"
+    assert lock_label() == "09:30"
     first_begin, first_end = slice_window(day, 0)
-    last_begin, last_end = slice_window(day, 17)
+    last_begin, last_end = slice_window(day, 29)
     assert first_begin == start
     assert label_hhmm(first_end) == "08:03"
-    assert label_hhmm(last_begin) == "08:51"
+    assert label_hhmm(last_begin) == "09:27"
     assert last_end == lock
-    order = ["claude", "grok-artist", "openai"]
-    sequence = [artist_on_slice(order, index) for index in range(18)]
-    assert sequence == order * 6
+    order = ["ross"]
+    sequence = [artist_on_slice(order, index) for index in range(30)]
+    assert sequence == ["ross"] * 30
+    assert [round_on_slice(index, 1) for index in (0, 11, 29)] == [1, 12, 30]
+    roster = ["claude", "grok-artist", "openai"]
+    assert [artist_on_slice(roster, index) for index in range(6)] == roster * 2
     assert [round_on_slice(index) for index in (0, 3, 15, 17)] == [1, 2, 6, 6]
 
 
@@ -47,8 +53,8 @@ def test_position_boundaries():
     assert position(parse_ny_local("2026-10-28T08:00:00")) == ("during", 0)
     assert position(parse_ny_local("2026-10-28T08:02:59")) == ("during", 0)
     assert position(parse_ny_local("2026-10-28T08:03:00")) == ("during", 1)
-    assert position(parse_ny_local("2026-10-28T08:53:59")) == ("during", 17)
-    assert position(parse_ny_local("2026-10-28T08:54:00")) == ("after", None)
+    assert position(parse_ny_local("2026-10-28T09:29:59")) == ("during", 29)
+    assert position(parse_ny_local("2026-10-28T09:30:00")) == ("after", None)
 
 
 def test_twelve_slice_history_still_locks_at_eight_thirty_six():
@@ -67,18 +73,26 @@ def test_twelve_slice_history_still_locks_at_eight_thirty_six():
     assert position(parse_ny_local("2026-10-28T08:36:00"), slice_count=12) == ("after", None)
 
 
-def test_tile_rounds_respects_bounds(monkeypatch):
+def test_tile_turns_respects_bounds(monkeypatch):
+    monkeypatch.setenv("TILE_TURNS", "2")
+    assert tile_turns() == 2
+    assert configured_slice_count() == 2
+    assert lock_label() == "08:06"
+    monkeypatch.setenv("TILE_TURNS", "90")
+    assert tile_turns() == 90
+    assert configured_slice_count() == 90
+    for raw in ("0", "91", "-3", "nope", "", "6.5"):
+        monkeypatch.setenv("TILE_TURNS", raw)
+        assert tile_turns() == 30, raw
+        assert configured_slice_count() == 30
+    monkeypatch.setenv("TILE_PIXELS_PER_TURN", "4096")
+    assert turn_pixel_budget() == 4096
+    monkeypatch.setenv("TILE_PIXELS_PER_TURN", "0")
+    assert turn_pixel_budget() == 16384
+    # TILE_ROUNDS still parses for older notes. It does not size a new canvas.
     monkeypatch.setenv("TILE_ROUNDS", "2")
     assert tile_rounds() == 2
-    assert configured_slice_count() == 6
-    assert lock_label() == "08:18"
-    monkeypatch.setenv("TILE_ROUNDS", "24")
-    assert tile_rounds() == 24
-    assert configured_slice_count() == 72
-    for raw in ("0", "25", "-3", "nope", "", "6.5"):
-        monkeypatch.setenv("TILE_ROUNDS", raw)
-        assert tile_rounds() == 6, raw
-        assert configured_slice_count() == 18
+    assert configured_slice_count() == 30
 
 
 def test_review_gate_holds_until_a_note_or_the_timeout():

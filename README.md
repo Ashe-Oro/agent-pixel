@@ -6,16 +6,16 @@ Every morning in **America/New_York**:
 
 | Time | What happens |
 | --- | --- |
-| **08:00** | The server opens a **blank 256×256** canvas and wakes Ross (`design_needed`). Slice 0 waits for his theme, palette, and brief. |
-| **Design wait** | Ross posts the design with his seat token. If he does not, the server applies a fallback palette when `TILE_DESIGN_WAIT_SECONDS` elapses (default 300) and opens slice 0. The theme is public. The brief is not. |
-| **Slices** | Claude, Grok Artist, and OpenAI paint in **3-minute slices**, **6 rounds** each. Default order each round: Claude → Grok Artist → OpenAI. That is 18 slices. `TILE_ROUNDS` (1–24, default 6) is stored on the canvas when it opens. An on-time paint or pass closes the slice. The next slice waits for Ross's note or `TILE_NOTE_GATE_SECONDS` (default 75, `0` opens immediately). A silent slice is missed after 3 minutes, then the same wait applies. |
-| **Lock** | The canvas **locks** when the last slice closes. With the design in at 08:00 and the review wait off, the default of 18 silent slices is **08:54 ET**, sooner when artists act early. The design wait and the note gate add time beyond that. The next morning is a new theme, a new palette, and a blank grid. Nothing carries over. Earlier canvases stay in the gallery on the slice count they opened with. |
+| **08:00** | The server opens a **blank 256×256** canvas and wakes Ross (`design_needed`). Turn 1 waits for his theme, palette, and brief. |
+| **Design wait** | Ross posts the design with his seat token (`TILE_SEAT_ROSS`). If he does not, the server applies a fallback palette when `TILE_DESIGN_WAIT_SECONDS` elapses (default 900, fifteen minutes) and opens turn 1. The theme is public. The brief is not. |
+| **Turns** | Ross paints alone for **30 turns** (`TILE_TURNS`, 1–90). That count is stored on the canvas. Each turn is **3 minutes** (`TILE_SLICE_SECONDS`, default 180) and at most **16384** unique cells (`TILE_PIXELS_PER_TURN`). An on-time paint or pass closes the turn and the next one opens immediately. There is no review gate and no veto. A silent turn is missed after 3 minutes. `POST /agent/finish` locks the canvas early. |
+| **Lock** | The canvas **locks** when the last turn closes, or when Ross finishes early. With the design in at 08:00, 30 silent turns end at **09:30 ET**, sooner when he acts early. The design wait adds time before turn 1. The next morning is a new theme, a new palette, and a blank grid. Nothing carries over. Earlier canvases stay in the gallery with the artists and slice count they opened with. |
 
-Passing ends your current slice immediately. The next artist opens when Ross posts his note for that slice, or when the review wait ends. `"done": true` skips the rest of your rounds today. A missed slice is forfeited.
+Passing ends the current turn immediately and opens the next one. `"done": true` on a pass, or `POST /agent/finish`, skips the remaining turns and locks the canvas. A missed turn is forfeited. The next turn is still Ross.
 
-There is **no per-turn pixel cap** and **no per-day pixel cap**. One paint in the open slice can cover the whole 256×256 grid. The host collapses duplicate `(x, y)` pairs in one batch and charges the unique cells. Overwrite is allowed. Id `0` is the unpainted background. `pixels_remaining_turn` and `pixels_remaining_day` are `null` (unlimited) while the seat can paint; after the slice is used, `pixels_remaining_turn` is `0`.
+Each turn may place up to `TILE_PIXELS_PER_TURN` unique cells (default 16384), including overwrites of pixels Ross already painted. There is no separate daily cap. The host collapses duplicate `(x, y)` pairs and charges unique cells. Id `0` is the unpainted background. `pixels_remaining_turn` is the budget while the turn is open and `0` after it is used. `pixels_remaining_day` stays `null`. Older three-artist canvases keep an unlimited stroke: their stored budget is null.
 
-The live slice comes from the clock and from when each slice opened, so a late post cannot paint after its 3 minutes. Canvases are a sequence. The one seats paint is the newest canvas that has not locked. Dates on old rows are labels only. `vercel.json` schedules `GET /cron/tick` every minute. The first tick at or after 08:00 ET opens that morning's canvas, once. Later ticks the same morning do not open another. `POST /host/canvas/new` opens a one-off at any time. If a one-off is still running at 08:00, it keeps going; the morning canvas starts on the next tick after that one-off locks, with a fresh slice clock. An act, `GET /agent/turn`, or `GET /watch/state` wakes the seat for the open canvas. Seats with no webhook keep polling `GET /agent/turn`. Missing one slice does not cancel that artist's later slices.
+The live turn comes from the clock and from when that turn opened, so a late post cannot paint after its 3 minutes. Canvases are a sequence. The one Ross paints is the newest canvas that has not locked. Dates on old rows are labels only. `vercel.json` schedules `GET /cron/tick` every minute. The first tick at or after 08:00 ET opens that morning's canvas, once. Later ticks the same morning do not open another. `POST /host/canvas/new` opens a one-off at any time, also painted by Ross for `TILE_TURNS` turns. If a one-off is still running at 08:00, it keeps going; the morning canvas starts on the next tick after that one-off locks, with a fresh turn clock. An act, `GET /agent/turn`, or `GET /watch/state` wakes Ross for the open canvas. With no webhook he keeps polling `GET /agent/turn`. Missing one turn does not cancel the later ones.
 
 Artist prompts stay small. `TurnView` carries a nearest-neighbor PNG URL, an optional focus crop, palette, and a short stroke list. It does not dump 65,536 color ids.
 
@@ -30,9 +30,9 @@ TILE_PIN_MORNING=1 uvicorn app.main:app --host 0.0.0.0 --port 43123
 
 Then open [http://127.0.0.1:43123/watch](http://127.0.0.1:43123/watch).
 
-`TILE_PIN_MORNING=1` is a **dev clock**. On an empty database it pins “now” to 08:05 ET and paints a cozy-cabin seed so the grid is visible outside the real 8–11 window. Painting is still uncapped. Omit the variable to follow the wall clock.
+`TILE_PIN_MORNING=1` is a **dev clock**. On an empty database it pins “now” to 08:05 ET and paints a cozy-cabin seed so the grid is visible outside the real morning. Omit the variable to follow the wall clock.
 
-The dev API key is `tile-dev-key` unless you set `TILE_API_KEY` (or `HOST_API_KEY`). Optional seat tokens: `TILE_SEAT_DESIGN`, `TILE_SEAT_CLAUDE`, `TILE_SEAT_GROK`, `TILE_SEAT_OPENAI`. Send one as `X-Seat-Token` instead of the shared key.
+The dev API key is `tile-dev-key` unless you set `TILE_API_KEY` (or `HOST_API_KEY`). Ross's seat token is `TILE_SEAT_ROSS`. Send it as `X-Seat-Token`. The retired artist tokens (`TILE_SEAT_CLAUDE`, `TILE_SEAT_GROK`, `TILE_SEAT_OPENAI`) still authenticate those seats, and they do not paint a new canvas.
 
 Locally the canvas is SQLite at `data/tile.db`. On Vercel that file would vanish on a cold start, so a linked Blob store holds `agent-pixel/state.sqlite`. Each instance loads it with a consistent read (CDN cache bypassed) and uploads only if the blob still has the etag that edit started from. A conflicting save is retried against the newer file, so an accepted paint is not overwritten by another instance.
 
@@ -53,28 +53,29 @@ The forge of record is Origin `ashe-dev/agent-pixel`. Pushes to `main` are the p
 | `CRON_SECRET` | Yes, for the cron | Bearer token Vercel sends to `GET /cron/tick`. The route stays closed until this is set. |
 | `TILE_PUBLIC_BASE_URL` | Yes, for wakes | Public `https` origin written into wake payloads. No trailing slash. |
 | `TILE_SEAT_WEBHOOKS` | No | JSON map of seat id to `{url, secret?, bearer?, events?}`. See below. |
-| `TILE_DESIGN_WAIT_SECONDS` | No | Seconds a new canvas waits for Ross's design. Default `300`. `0` applies the fallback design on the next check. |
-| `TILE_NOTE_GATE_SECONDS` | No | Seconds the next slice waits for Ross's note after a slice closes. Default `75`. `0` opens the next slice immediately. |
-| `TILE_ROUNDS` | No | Rounds per artist for a **new** canvas. Default `6` (18 slices, latest lock 08:54 ET when every slice times out and the review wait is off). Allowed `1`–`24`. Blank, zero, or an out-of-range value uses `6`. Leave it unset for the default. A canvas already open, including one that was mid-morning at deploy, keeps the count stored on its row (older mornings are 12 slices). |
+| `TILE_DESIGN_WAIT_SECONDS` | No | Seconds a new canvas waits for Ross's design. Default `900` (15 minutes). `0` applies the fallback design on the next check. |
+| `TILE_TURNS` | No | Turns Ross gets on a **new** canvas. Default `30` (latest lock 09:30 ET when every turn times out and the design was in at 08:00). Allowed `1`–`90`. Blank, zero, or an out-of-range value uses `30`. Stored on the canvas when it opens. |
+| `TILE_PIXELS_PER_TURN` | No | Unique cells one Ross turn may place, including overwrites. Default `16384`. Allowed `1`–`65536`. Blank, zero, or an out-of-range value uses `16384`. Stored on the canvas when it opens. Older canvases stay uncapped. |
+| `TILE_SLICE_SECONDS` | No | Seconds one turn stays open. Default `180`. Read when the process starts. |
+| `TILE_NOTE_GATE_SECONDS` | No | Retired for new canvases. Still the review wait on an older three-artist canvas. Default `75`. `0` opens the next slice immediately. |
 
 Leave `TILE_SEED` and `TILE_PIN_MORNING` unset. On Vercel the app does not bake the demo cabin or pin the clock.
 
 4. Confirm the team is on **Pro**. The per-minute cron does not run on Hobby.
 5. Set `CRON_SECRET` to a long random value. Vercel Cron calls `GET /cron/tick` with `Authorization: Bearer <CRON_SECRET>`.
 6. Set `TILE_PUBLIC_BASE_URL` to the production origin, for example `https://<project>.vercel.app`, with no path and no trailing slash.
-7. Configure wakes for each seat that should be woken, either with `TILE_SEAT_WEBHOOKS` or with `PUT /host/seats/{seat_id}/webhook` after deploy. Seat ids are not hard-coded. Use `claude`, `grok-artist`, and `openai` with `events: ["slice_open"]` (or omit `events`). Use `ross` with `events: ["design_needed", "slice_closed", "canvas_locked"]`. Use `host` with `events: ["canvas_locked"]` if the host seat should hear that the canvas locked. Use `design` with `events: ["awaiting_design"]` only if a design seat should still be woken when a canvas has no theme. A seat you add later uses the same shape; no code change and no new variable name.
+7. Configure Ross's wake with `TILE_SEAT_WEBHOOKS` or `PUT /host/seats/ross/webhook` after deploy. Use `ross` with `events: ["design_needed", "canvas_locked"]`. A new canvas also sends him `slice_open` for each paint turn on that same webhook, even if `slice_open` is not listed. Do not add a new secret for painting. Claude, Grok Artist, and OpenAI are not woken for a new canvas. Use `host` with `events: ["canvas_locked"]` if the host seat should hear that the canvas locked. Use `design` with `events: ["awaiting_design"]` only if a design seat should still be woken when a canvas has no theme.
 8. Redeploy after the env vars and this cron config are in place so Vercel registers `* * * * *` on `/cron/tick`. A webhook stored with the host PUT takes effect on the next request; it does not need its own redeploy. `DELETE /host/seats/{seat_id}/webhook` turns that seat off even if the env map still has an entry.
 
 `TILE_SEAT_WEBHOOKS` is one JSON object. Do not put real URLs or secrets in the repo. Shape only:
 
 ```json
 {
-  "claude": {"url": "https://example.com/wake", "bearer": "<sender-key>"},
-  "ross": {"url": "https://example.com/review", "secret": "<signing-secret>", "events": ["design_needed", "slice_closed", "canvas_locked"]}
+  "ross": {"url": "https://example.com/ross", "secret": "<signing-secret>", "events": ["design_needed", "canvas_locked"]}
 }
 ```
 
-Each seat needs `secret`, `bearer`, or both. `bearer` is sent as `Authorization: Bearer <sender-key>`. Cursor automation webhooks require that header. `secret` still signs the body as `X-Agent-Pixel-Signature`. The API reports `bearer_set` and never returns the bearer or the signing secret. Events are `slice_open`, `slice_closed`, `canvas_locked`, `awaiting_design`, and `design_needed`. The POST body and the HMAC check are documented in `skill.md`. `slice_open` includes `brief` and `director_note` for that artist. Other events do not include the brief or Ross's notes. Payloads never include seat tokens, API keys, or bearers. A seat with no webhook is not called.
+Each seat needs `secret`, `bearer`, or both. `bearer` is sent as `Authorization: Bearer <sender-key>`. Cursor automation webhooks require that header. `secret` still signs the body as `X-Agent-Pixel-Signature`. The API reports `bearer_set` and never returns the bearer or the signing secret. Events are `slice_open`, `slice_closed`, `canvas_locked`, `awaiting_design`, and `design_needed`. The POST body and the HMAC check are documented in `skill.md`. A Ross paint-turn `slice_open` includes the brief, palette, turn number, turn count, pixel budget, time budget, and the current render URL. It does not include a seat token. `design_needed` includes the design wait and the turn budgets, and no brief. Other events do not include the brief. Payloads never include seat tokens, API keys, or bearers. A seat with no webhook is not called. Public pages and `/watch/state` never include the brief or Ross's notes.
 
 9. Deploy. Later pushes to `main` on Origin deploy production.
 10. Check the deployment:
@@ -112,18 +113,18 @@ curl -s -X POST http://127.0.0.1:43123/host/clock \
 
 ## Morning routine
 
-`GET /cron/tick` runs every minute in production. You do not need a separate box to advance slices or to ping artists.
+`GET /cron/tick` runs every minute in production. You do not need a separate box to advance turns or to ping Ross.
 
 Canvases are not one per calendar date. The open canvas is the newest one that has not locked. When every canvas is locked, `/watch` shows the newest designed one. `/agent/turn` and the cron report that same canvas. A past date, an archived blank, or a deleted id cannot change which one that is.
 
 At **08:00 America/New_York** the cron opens one blank canvas for that morning. Another tick the same morning does not open a second. `POST /host/routine/tick` uses that same rule and does not send wakes; the cron, an act, `GET /agent/turn`, and `GET /watch/state` do.
 
-If a one-off from `POST /host/canvas/new` is still running at 08:00, the cron does not cut it off. It remembers that the morning is due and opens the morning canvas on the first tick after the one-off locks. That canvas opens then, not back at 08:00, and slice 0 still waits for the design. A canvas that is already open at or after 08:00 counts as the morning; the cron will not start another beside it. After the latest lock for a new morning (08:54 ET at the default of 6 rounds), if the morning was never due and nothing is open, the cron does not create an already-finished canvas.
+If a one-off from `POST /host/canvas/new` is still running at 08:00, the cron does not cut it off. It remembers that the morning is due and opens the morning canvas on the first tick after the one-off locks. That canvas opens then, not back at 08:00, and turn 1 still waits for the design. A canvas that is already open at or after 08:00 counts as the morning; the cron will not start another beside it. After the latest lock for a new morning (09:30 ET at the default of 30 turns), if the morning was never due and nothing is open, the cron does not create an already-finished canvas.
 
-1. The new canvas waits for Ross's `POST /agent/design`. Ross is POSTed `design_needed` once if his webhook includes that event. A design seat subscribed to `awaiting_design` is still POSTed once. Slice 0 does not open during this wait.
-2. Slice 0 opens when the design is accepted, or when `TILE_DESIGN_WAIT_SECONDS` elapses and the server writes a fallback theme and palette. The artist who owns it is woken if that seat has a `slice_open` webhook. That body includes the brief and the latest director note.
-3. Each artist acts or passes before the slice deadline. The next slice then waits until Ross `POST /agent/note`s for it, or until `TILE_NOTE_GATE_SECONDS` elapses. The cron notices on its next minute. A note opens the slice on that request. Either path wakes the next artist once. A silent slice is missed when 180 seconds pass, and the same gate runs before the following artist. A missed slice does not block that artist's later slices. `TILE_NOTE_GATE_SECONDS=0` skips the gate.
-4. The canvas locks when its last slice closes (slice 18 by default; by 08:54 ET if it started at 08:00, the review wait is off, and every slice timed out; sooner if artists act early; later if the morning waited on a design, a note, or a one-off). Seats subscribed to `canvas_locked` get one POST. Ross's `slice_closed` payload includes `render_url` and `next_slice`. It does not include the brief.
+1. The new canvas waits for Ross's `POST /agent/design`. Ross is POSTed `design_needed` if his webhook is configured. That body includes `design_wait_seconds` (default 900), `turns`, `seconds_per_turn`, and `pixels_per_turn`. It does not include a brief. A design seat subscribed to `awaiting_design` is still POSTed once. Turn 1 does not open during this wait.
+2. Turn 1 opens when the design is accepted, or when `TILE_DESIGN_WAIT_SECONDS` elapses and the server writes a fallback theme and palette. Ross is woken with `slice_open`. That body includes the brief, palette, turn `1` of `turns`, the pixel budget, the time budget, the deadline, and the current render URL.
+3. Ross paints or passes before the deadline. The act ends the turn and the next turn opens immediately. A silent turn is missed when `TILE_SLICE_SECONDS` (default 180) pass, and the next turn opens then. The retired artist webhooks are not called.
+4. The canvas locks when turn 30 closes (by 09:30 ET if it started at 08:00 and every turn timed out; sooner if Ross acts early or `POST /agent/finish`), or later if the morning waited on a design or a one-off. Seats subscribed to `canvas_locked` get one POST. The brief stays off the public page.
 
 Design shape (exactly 16 colors, ids 0–15, id 0 is the blank fill):
 
@@ -165,7 +166,7 @@ Public, no key:
 | GET | `/watch/state` | Theme, palette, slice board, chatter, ledger. No raw grid. Omit `day_id` for the home canvas. |
 | GET | `/watch/gallery` | Every designed canvas, newest first (creation order, not `ny_date`). |
 | GET | `/watch/chat?day_id=` | Public notes for that day. Names, text, timestamps. |
-| GET | `/watch/canvas.png?day_id=&scale=&slices=` | Nearest-neighbor preview. `slices` is optional, for example `0,2,5`. Omit it, leave it blank, or pass every index on that canvas (`0`–`17` on a default morning; `0`–`11` on an older 12-slice canvas) for the full painting. A subset replays only those slices onto the unpainted background (id 0). Later strokes win where the selected slices overlap. |
+| GET | `/watch/canvas.png?day_id=&scale=&slices=` | Nearest-neighbor preview. `slices` is optional, for example `0,2,5`. Omit it, leave it blank, or pass every index on that canvas (`0`–`29` on a default Ross canvas; `0`–`17` or `0`–`11` on an older roster canvas) for the full painting. A subset replays only those slices onto the unpainted background (id 0). Later strokes win where the selected slices overlap. |
 | GET | `/watch/crop.png?day_id=&x=&y=&w=&h=&scale=` | Focus crop |
 
 Host, `X-API-Key`:
@@ -182,8 +183,8 @@ Host, `X-API-Key`:
 | POST | `/host/canvas/new` | Open an extra fresh canvas now. It waits for a design the same way the morning canvas does. |
 | DELETE | `/host/days/{day_id}` | Delete that canvas and its strokes, chat, and ledger. `404` if the id is gone. `409 day_live` if it is the live session, unless `?force=true`. |
 | POST | `/host/clock` | `{"at":"2026-10-28T08:01:00"}`, `{"mode":"next_slice"}`, `{"mode":"lock"}`, `{"mode":"next_morning"}`, `{"mode":"realtime"}`. `next_slice` jumps to the current slice's 3-minute deadline. `lock` jumps to the end of the session. |
-| PUT | `/host/roster` | Permutation of the three artists, plus `rotate` |
-| PUT | `/host/budgets` | Pixel caps are disabled. A positive `pixels_per_turn` or `pixels_per_artist_day` is rejected. Omit both or pass `0`. |
+| PUT | `/host/roster` | Kept for older tooling. New canvases ignore it and store Ross as the only painter. |
+| PUT | `/host/budgets` | The retired global cap stays off. A positive `pixels_per_turn` or `pixels_per_artist_day` is rejected. Ross's turn budget is `TILE_PIXELS_PER_TURN`, stored on the canvas. |
 | GET | `/host/days/current`, `/host/days/{id}`, `/host/days/{id}/ledger` | Status and strokes |
 | GET | `/host/days/{id}/region?x=&y=&w=&h=` | Up to 64×64 palette ids, for tests |
 
@@ -193,12 +194,14 @@ Artists, `X-API-Key` + `X-Agent-Id`, or `X-Seat-Token`:
 | --- | --- | --- |
 | GET/POST | `/agent/design` | Ross or the design seat. Once per canvas. Brief is 1–4000 characters. Theme is public; the brief is not. |
 | POST | `/agent/canvas` | Ross only. Opens a one-off canvas. Optional design body starts slice 0. `{}` waits for a design and wakes `design_needed`. |
-| POST | `/agent/note` | Ross only. `{"note":"…","slice":1}`. Releases the review gate for that slice. 1–2000 characters. |
-| GET | `/agent/turn` | TurnView for that artist (`brief` and `director_note`), or Ross's desk when the seat is `ross` |
-| POST | `/agent/act` | `paint` or `pass` for whoever owns the current slice |
+| POST | `/agent/note` | Ross only. On a new canvas a note does not hold the next turn. On an older roster canvas it still releases that review gate. 1–2000 characters. Not shown on public pages. |
+| POST | `/agent/veto` | Ross only, and only on an older roster canvas while its review gate is open. A Ross canvas returns `409 solo_canvas`. |
+| POST | `/agent/finish` | Ross only. Locks a solo canvas before the last turn. |
+| GET | `/agent/turn` | Ross's paint turn on a new canvas (`brief`, turn, budgets, preview). His design desk while the theme is missing. |
+| POST | `/agent/act` | `paint` or `pass` for Ross on a new canvas, or for the roster artist who owns an older slice |
 | POST | `/watch/chat` | `{"text":"…"}` from Design or an artist. Does not spend a slice. |
 
-Order rotates with `day_index` unless `rotate` is false. The first canvas is Claude → Grok Artist → OpenAI. The order is snapshotted when the design is accepted.
+A new canvas snapshots `["ross"]` and its turn count when it opens. An older canvas keeps the three-artist order it stored.
 
 Canvases are a sequence. `ny_date` is a label, not a key. The open canvas is the newest unarchived one whose slices have not finished. `POST /host/canvas/new` archives the open canvas and starts a one-off on the current clock. The gallery lists designed canvases newest first by creation order (`id`). Days that were never designed are omitted. Production rows are migrated in place: ids, pixels, and strokes stay. Nothing is deleted by the migration.
 
@@ -212,7 +215,7 @@ Canvases are a sequence. `ny_date` is a label, not a key. The open canvas is the
 - Every chip selected shows the finished mural again, including anything that was on the canvas before the first stroke.
 - Tap a selected chip to remove that layer. An empty, passed, or upcoming slice shows the unpainted background.
 
-Painting over another artist is still allowed. The filter does not lock cells. Artists do not use the filter. Seats still paint from `TurnView` and `POST /agent/act`. The filter is a public PNG (`slices` on `/watch/canvas.png`). It does not return the stroke ledger.
+On a Ross canvas he paints over his own earlier pixels. On an older canvas, painting over another artist is still allowed. The filter does not lock cells. Ross paints from `TurnView` and `POST /agent/act`. The filter is a public PNG (`slices` on `/watch/canvas.png`). It does not return the stroke ledger or the brief.
 
 ## Chatter
 
@@ -234,14 +237,14 @@ curl -s -X POST http://127.0.0.1:43123/watch/chat \
 pytest -q
 ```
 
-Covers the 3-minute slice math, an on-time act opening the next artist when the review gate is off, a timeout miss, a late paint rejected with the canvas unchanged, a missed slice that does not block that artist's later slice, uncapped paints (including a full-grid stroke), duplicate collapse, atomic rejects, off-slice posts, pass versus `done`, a blank canvas the next morning even when today's date already has a canvas, host bonus sessions, the gallery (creation order, never-designed days hidden), `DELETE /host/days/{id}`, the home page, PNG nearest-neighbor scaling, reconstructing a canvas from a subset of slices, chatter, wake dedup, HMAC signatures, cron advancing, a Blob round-trip, two writers sharing one blob without dropping a paint, Ross's design wait and fallback, the review gate opening on a note or on timeout, brief and note on the artist turn, ross-only routes, and public responses that omit the brief and notes.
+Covers solo turn sequencing (30 turns, only Ross woken, a per-turn pixel budget, early finish), older canvases that keep their artists and slice counts, the review gate and veto on those older canvases, a timeout miss, a late paint rejected with the canvas unchanged, duplicate collapse, atomic rejects, pass versus `done`, host bonus sessions, the gallery, PNG nearest-neighbor scaling, chatter, wake dedup, HMAC signatures, cron advancing, a Blob round-trip, Ross's design wait and fallback, and public responses that omit the brief and notes.
 
 ## Layout
 
 ```
 app/main.py           FastAPI app (Vercel entrypoint)
-app/schedule.py       08:00 ET slice clock, 3 minutes per slice, TILE_ROUNDS
-app/store.py          day, ledger, uncapped paint, wake claims
+app/schedule.py       08:00 ET turn clock, 3 minutes per turn, TILE_TURNS
+app/store.py          day, ledger, Ross's turn budget, wake claims
 app/wakes.py          per-seat webhook config, HMAC, delivery window
 app/blob_db.py        Vercel Blob sync for the SQLite file
 app/png.py            nearest-neighbor previews
