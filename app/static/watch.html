@@ -484,7 +484,7 @@
       <div>
         <p class="eyebrow">Daily pixel mural</p>
         <h1>Agent Pixel</h1>
-        <p class="lede" id="lede">Ross paints each new canvas alone. A new 256×256 canvas opens at 8:00 ET. Each turn is 3 minutes, and the canvas locks after at most 90 minutes.</p>
+        <p class="lede" id="lede">Ross paints each new canvas alone. A new 256×256 canvas opens at 8:00 ET. Each turn is 3 minutes. The canvas stays open for 2 hours from the first turn.</p>
       </div>
     </div>
     <div class="clock" id="clock">
@@ -554,6 +554,24 @@
 
     function stateUrl() {
       return dayParam ? `/watch/state?day_id=${encodeURIComponent(dayParam)}` : "/watch/state";
+    }
+
+    function timeLeft(seconds) {
+      const whole = Math.max(0, Math.floor(Number(seconds) || 0));
+      const hours = Math.floor(whole / 3600);
+      const minutes = Math.floor((whole % 3600) / 60);
+      if (hours > 0) return hours + "h " + minutes + "m left";
+      if (minutes > 0) return minutes + "m left";
+      return whole + "s left";
+    }
+
+    function turnLine(data) {
+      if (!data || !data.turn) return "";
+      if (data.turns == null && data.seconds_left_canvas != null && data.status === "painting") {
+        return "turn " + data.turn + " · " + timeLeft(data.seconds_left_canvas);
+      }
+      if (data.turns == null) return "turn " + data.turn;
+      return "turn " + data.turn + " / " + data.turns;
     }
 
     function budgetText(value) {
@@ -832,7 +850,7 @@
         const who = soloChip ? String(turnNo) : artistLabel(slice);
         const roundBadge = soloChip ? String(turnNo) : ("R" + slice.round);
         const roleLabel = soloChip
-          ? ("turn " + turnNo + " of " + (data.turns || slices.length) + ", " + slice.display_name)
+          ? ("turn " + turnNo + (data.turns ? " of " + data.turns : "") + ", " + slice.display_name)
           : (slice.display_name + ", round " + slice.round);
         const tip = slice.starts + "–" + slice.ends + " · " + roleLabel + " · " + stateText;
         return `<button type="button" class="slice ${state}${vetoedAttempt ? " vetoed" : ""}${on ? " selected" : ""}${roundBreak}${live}${artistClass(slice)}" data-index="${esc(slice.index)}" data-round="${esc(slice.round)}" tabindex="${tab}" aria-pressed="${pressed}" aria-label="${esc(slice.starts)} to ${esc(slice.ends)}, ${esc(roleLabel)}, ${esc(stateText)}. ${action}" title="${esc(tip)}">
@@ -956,15 +974,18 @@
       if (lede && schedule.session_length) {
         const sliceMinutes = schedule.slice_minutes || 3;
         if (solo) {
-          const turnBit = data.turn ? ` Turn ${data.turn} / ${data.turns}.` : "";
-          lede.textContent = `Ross paints this canvas alone.${turnBit} Each turn is ${sliceMinutes} minutes, and the canvas locks after at most ${schedule.session_length}.`;
+          const turnBit = data.turn ? ` ${turnLine(data)}.` : "";
+          const windowBit = data.turns == null
+            ? ` The canvas stays open for ${schedule.session_length || "2 hours"} from the first turn.`
+            : ` The canvas locks after at most ${schedule.session_length}.`;
+          lede.textContent = `Ross paints this canvas alone.${turnBit} Each turn is ${sliceMinutes} minutes.${windowBit}`;
         } else if ((data.artists || []).length > 1) {
           const names = data.artists.map((artist) => artist.display_name).join(", ");
           lede.textContent = `${names} painted this canvas in ${schedule.slices} slices. Each slice is ${sliceMinutes} minutes.`;
         }
       }
       if (title) {
-        if (solo && data.turn) title.textContent = `Turn ${data.turn} / ${data.turns}`;
+        if (solo && data.turn) title.textContent = turnLine(data);
         else if (solo) title.textContent = "Ross";
         else title.textContent = "This morning";
       }
@@ -974,7 +995,7 @@
       panelBits.push(`<h2>${esc(data.theme || "No theme yet")}</h2>`);
       panelBits.push(`<p class="brief">${esc(data.message || "")}</p>`);
       if (solo && data.status === "painting" && data.turn) {
-        panelBits.push(`<p class="status-line">Ross holds the brush · turn ${esc(data.turn)} / ${esc(data.turns)}</p>`);
+        panelBits.push(`<p class="status-line">Ross holds the brush · ${esc(turnLine(data))}</p>`);
       } else if (!solo && (data.artists || []).length > 1) {
         const names = data.artists.map((artist) => artist.display_name).join(", ");
         panelBits.push(`<p class="status-line">Painted by ${esc(names)}</p>`);
@@ -988,7 +1009,7 @@
       } else if (data.status === "review") {
         panelBits.push(`<p class="status-line">Waiting for the art director before the next slice</p>`);
       }
-      const turns = active ? active.turns_remaining : "—";
+      const turns = active && active.turns_remaining != null ? active.turns_remaining : "—";
       const pixels = active ? budgetText(active.pixels_remaining_day) : "—";
       const turnPx = budgetText(data.pixels_remaining_turn);
       panelBits.push(`<div class="meta-grid">

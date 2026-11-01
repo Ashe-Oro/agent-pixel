@@ -1,14 +1,11 @@
 """Wall-clock schedule for an Agent Pixel morning.
 
 America/New_York. The session opens at 08:00. A new canvas is painted by Ross
-alone for ``tile_turns()`` turns (``TILE_TURNS``, default 30). Each turn stays
-open for at most ``SLICE_SECONDS`` (default 180, three minutes) measured from
-when that turn opened. An on-time paint or pass closes the turn immediately
-and opens the next one. A turn with no action closes when its three minutes
-run out and is missed. With the default, thirty timeouts end the canvas 90
-minutes after painting started (09:30 ET if the design was in at 08:00);
-early acts finish it sooner. A canvas stores its own slice count and painter
-order, so older three-artist mornings keep that clock.
+alone until he finishes or ``TILE_SOLO_WINDOW_SECONDS`` (default 7200, two
+hours) elapse from the moment turn 1 opens. Each turn stays open for at most
+``SLICE_SECONDS`` (default 180) and never past that window. An on-time paint
+or pass closes the turn and opens the next one immediately. A canvas stores
+its own slice count, so older mornings keep the turn count they opened with.
 """
 
 from __future__ import annotations
@@ -23,14 +20,18 @@ NY = ZoneInfo("America/New_York")
 OPEN_HOUR = 8
 # One place for the slice length. TILE_SLICE_SECONDS overrides it; 180 is 3 minutes.
 SLICE_SECONDS = int(os.environ.get("TILE_SLICE_SECONDS", "180"))
-# TILE_ROUNDS is the retired three-artist round count. New canvases use TILE_TURNS.
+# TILE_ROUNDS is the retired three-artist round count.
 DEFAULT_ROUNDS = 6
 MIN_ROUNDS = 1
 MAX_ROUNDS = 24
-# TILE_TURNS is read when a canvas is created. 1..90, default 30.
-DEFAULT_TURNS = 30
-MIN_TURNS = 1
-MAX_TURNS = 90
+# Stored slice_count 0 means Ross paints with no turn cap, only a time window.
+UNLIMITED_SLICE_COUNT = 0
+# How long a new solo canvas stays open after turn 1 starts. Default 2 hours.
+DEFAULT_SOLO_WINDOW = 7200
+MIN_SOLO_WINDOW = 1
+MAX_SOLO_WINDOW = 7 * 24 * 3600
+# Parser ceiling for slice indices on a fast solo canvas. Not a turn cap.
+MAX_ADDRESSED_TURNS = 5000
 # Unique cells Ross may place in one turn, including overwrites of his own pixels.
 DEFAULT_TURN_PIXELS = 16384
 ARTISTS = ("claude", "grok-artist", "openai")
@@ -219,15 +220,16 @@ def tile_rounds() -> int:
     return value
 
 
-def tile_turns() -> int:
-    """Turns Ross gets on a canvas created now. ``TILE_TURNS``.
+def solo_window_seconds() -> int:
+    """How long a new solo canvas stays open after turn 1. ``TILE_SOLO_WINDOW_SECONDS``.
 
-    Default 30. Blank, non-integer, negative, zero, or a value outside 1..90
-    uses 30. Zero is not a turn count: a canvas with no turns cannot open.
+    Default 7200 (two hours). Measured from the moment turn 1 opens, which is
+    when the design is accepted. Blank, zero, or a value outside 1..604800
+    uses 7200. Stored on the canvas so a later change does not move it.
     """
-    value = env_seconds("TILE_TURNS", DEFAULT_TURNS)
-    if value < MIN_TURNS or value > MAX_TURNS:
-        return DEFAULT_TURNS
+    value = env_seconds("TILE_SOLO_WINDOW_SECONDS", DEFAULT_SOLO_WINDOW)
+    if value < MIN_SOLO_WINDOW or value > MAX_SOLO_WINDOW:
+        return DEFAULT_SOLO_WINDOW
     return value
 
 
@@ -245,17 +247,28 @@ def turn_pixel_budget() -> int:
 
 
 def configured_slice_count() -> int:
-    """Turns stored on a canvas created now. ``TILE_TURNS``, default 30."""
-    return tile_turns()
+    """Slice count stored on a canvas created now.
+
+    ``0`` means unlimited turns. The canvas is capped by ``TILE_SOLO_WINDOW_SECONDS``.
+    """
+    return UNLIMITED_SLICE_COUNT
+
+
+def is_unlimited_count(slice_count: int | None) -> bool:
+    """True when ``slice_count`` is the unlimited-turn sentinel."""
+    if slice_count is None:
+        return configured_slice_count() == UNLIMITED_SLICE_COUNT
+    return slice_count == UNLIMITED_SLICE_COUNT
 
 
 def max_slice_count() -> int:
-    """Largest slice count a canvas row can address.
+    """Largest slice index the public slice query will parse.
 
-    Covers a retired 24-round three-artist morning and a solo canvas at
-    ``MAX_TURNS``.
+    Finite mornings stay small. A solo canvas can open a new turn every act,
+    so the parser allows several thousand indices. The canvas itself still
+    rejects an index that never opened.
     """
-    return max(MAX_ROUNDS * len(ARTISTS), MAX_TURNS)
+    return max(MAX_ROUNDS * len(ARTISTS), MAX_ADDRESSED_TURNS)
 
 
 def is_solo_order(order: list[str]) -> bool:
@@ -271,9 +284,15 @@ def seats_for(order: list[str] | None) -> int:
 
 
 def resolve_slice_count(slice_count: int | None) -> int:
-    """Use ``slice_count`` when it is a real canvas length, else the setting."""
+    """Use ``slice_count`` when it is a real canvas length, else the setting.
+
+    ``0`` stays ``0`` (unlimited turns). A missing count uses the setting for
+    a canvas created now, which is also ``0``.
+    """
     if slice_count is None:
         return configured_slice_count()
+    if slice_count == UNLIMITED_SLICE_COUNT:
+        return UNLIMITED_SLICE_COUNT
     if slice_count < 1:
         return LEGACY_SLICE_COUNT
     return slice_count
@@ -282,26 +301,34 @@ def resolve_slice_count(slice_count: int | None) -> int:
 def rounds_in(slice_count: int, seats: int | None = None) -> int:
     """Highest 1-based round number on a canvas with ``slice_count`` slices.
 
-    ``seats`` is 1 on a solo canvas, so each turn is its own round. The
-    retired roster uses three seats.
+    ``seats`` is 1 on a finite solo canvas, so each turn is its own round.
+    The retired roster uses three seats. Unlimited canvases have no round count.
     """
     size = len(ARTISTS) if not seats else seats
     if size < 1:
         size = 1
     if slice_count < 1:
-        return tile_turns() if size == 1 else tile_rounds()
+        return tile_rounds()
     return (slice_count - 1) // size + 1
 
 
 def session_minutes(slice_count: int | None = None) -> int:
+    if is_unlimited_count(slice_count):
+        return solo_window_seconds() // 60
     total = resolve_slice_count(slice_count)
     return (total * SLICE_SECONDS) // 60
 
 
 def session_length_phrase(slice_count: int | None = None) -> str:
-    """How long every slice timing out lasts, for status copy."""
-    total = resolve_slice_count(slice_count)
-    seconds = total * SLICE_SECONDS
+    """How long a full session lasts, for status copy."""
+    if is_unlimited_count(slice_count):
+        seconds = solo_window_seconds()
+    else:
+        seconds = resolve_slice_count(slice_count) * SLICE_SECONDS
+    if seconds % 3600 == 0:
+        hours = seconds // 3600
+        unit = "hour" if hours == 1 else "hours"
+        return f"{hours} {unit}"
     if seconds % 60 == 0:
         minutes = seconds // 60
         unit = "minute" if minutes == 1 else "minutes"
@@ -314,12 +341,15 @@ def ny_date(now: datetime) -> str:
 
 
 def day_bounds(d: date, slice_count: int | None = None) -> tuple[datetime, datetime]:
-    """08:00 ET through the latest possible lock, when every slice times out.
+    """08:00 ET through the latest moment that morning can still be opened.
 
-    ``slice_count`` is that canvas's stored length. Omit it for a new canvas
-    under the current ``TILE_TURNS``.
+    A finite canvas locks when its stored slices time out. An unlimited solo
+    canvas can still be opened any time after 08:00 on that New York date.
+    Its paint window is separate: two hours from turn 1, not from 08:00.
     """
     start = datetime(d.year, d.month, d.day, OPEN_HOUR, 0, 0, tzinfo=NY)
+    if is_unlimited_count(slice_count):
+        return start, start + timedelta(days=1)
     lock = start + timedelta(seconds=resolve_slice_count(slice_count) * SLICE_SECONDS)
     return start, lock
 
@@ -437,7 +467,12 @@ def walk_session(
     notes = note_at or {}
     redo_windows = redos or {}
     gate = gate_seconds if gate_seconds > 0 else 0
-    total = resolve_slice_count(slice_count)
+    # Omitted length is the retired 18-slice roster clock. Callers that mean
+    # a stored canvas pass that count, including 0 for an unlimited solo canvas.
+    if slice_count is None:
+        total = 6 * len(ARTISTS)
+    else:
+        total = resolve_slice_count(slice_count)
     cursor = start
     marks: list[SliceMark] = []
     live_index: int | None = None
@@ -530,10 +565,20 @@ def walk_session(
 
 
 def position(now: datetime, slice_count: int | None = None) -> tuple[str, int | None]:
-    """Calendar morning with no early acts: 08:00, then one slice every 3 minutes."""
+    """Where a calendar morning is when no canvas row is driving the clock.
+
+    An unlimited morning can still be opened any time after 08:00 that date.
+    A finite morning follows its stored slice clock.
+    """
     local = now.astimezone(NY)
     total = resolve_slice_count(slice_count)
-    start, _ = day_bounds(local.date(), total)
+    start, lock = day_bounds(local.date(), total)
+    if is_unlimited_count(total):
+        if local < start:
+            return "before", None
+        if local >= lock:
+            return "after", None
+        return "during", None
     clock = walk_session(start, {}, now, slice_count=total)
     return clock.phase, clock.index
 
@@ -564,11 +609,96 @@ def session_slice_window(
 
 
 def lock_label(slice_count: int | None = None) -> str:
-    """Wall-clock lock when an 08:00 canvas times out every slice and the gate is off."""
+    """Wall-clock lock when painting starts at 08:00 and runs to its cap.
+
+    Unlimited solo canvases show 08:00 plus ``TILE_SOLO_WINDOW_SECONDS``
+    (10:00 ET at the default). Finite canvases add one slice length per turn.
+    """
     start = datetime(2000, 1, 1, OPEN_HOUR, 0, 0, tzinfo=NY)
+    if is_unlimited_count(slice_count):
+        return label_hhmm(start + timedelta(seconds=solo_window_seconds()))
     total = resolve_slice_count(slice_count)
     lock = start + timedelta(seconds=total * SLICE_SECONDS)
     return label_hhmm(lock)
+
+
+def walk_timed_solo(
+    opens_at: datetime,
+    acted_at: dict[int, datetime] | None,
+    now: datetime,
+    window_end: datetime,
+    done_index: int | None = None,
+) -> SessionClock:
+    """Ross's open-ended turn clock, capped by ``window_end``.
+
+    Turn 1 opens at ``opens_at``. Each turn lasts at most ``SLICE_SECONDS``
+    and is clamped so it cannot run past ``window_end``. A paint or pass
+    closes the turn at that instant and opens the next one. ``done_index``
+    is the turn Ross finished on; nothing opens after it.
+    """
+    start = opens_at.astimezone(NY)
+    end = window_end.astimezone(NY)
+    if end < start:
+        end = start
+    local = now.astimezone(NY)
+    actions = acted_at or {}
+    cursor = start
+    marks: list[SliceMark] = []
+    live_index: int | None = None
+    live_deadline: datetime | None = None
+    index = 0
+    guard = 0
+    while cursor < end and guard < MAX_ADDRESSED_TURNS:
+        guard += 1
+        if done_index is not None and index > done_index:
+            break
+        remaining = (end - cursor).total_seconds()
+        if remaining <= 0:
+            break
+        span = SLICE_SECONDS if remaining > SLICE_SECONDS else remaining
+        deadline = cursor + timedelta(seconds=span)
+        raw = actions.get(index)
+        raw_local = raw.astimezone(NY) if raw is not None else None
+        if raw_local is not None and raw_local <= cursor:
+            marks.append(SliceMark(index, cursor, deadline, cursor, True, False))
+            if done_index is not None and index == done_index:
+                cursor = cursor
+                break
+            index += 1
+            continue
+        if raw_local is not None:
+            close = raw_local if raw_local < deadline else deadline
+            if close < cursor:
+                close = cursor
+            marks.append(SliceMark(index, cursor, deadline, close, True, False))
+            cursor = close
+            if done_index is not None and index == done_index:
+                break
+            index += 1
+            continue
+        if local < cursor:
+            break
+        if local < deadline:
+            marks.append(SliceMark(index, cursor, deadline, deadline, False, False))
+            live_index = index
+            live_deadline = deadline
+            break
+        marks.append(SliceMark(index, cursor, deadline, deadline, False, True))
+        cursor = deadline
+        index += 1
+    if done_index is not None:
+        for mark in marks:
+            if mark.index == done_index:
+                cursor = mark.closes
+                break
+    if local < start:
+        phase, shown = "before", None
+    elif live_index is not None and (done_index is None or live_index <= done_index):
+        phase, shown = "during", live_index
+    else:
+        phase, shown = "after", None
+        live_deadline = None
+    return SessionClock(phase, shown, live_deadline, end if done_index is None else cursor, tuple(marks))
 
 
 def slice_index(now: datetime) -> int | None:

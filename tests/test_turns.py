@@ -4,28 +4,33 @@ from tests.conftest import auth, host, open_design, pin
 def test_off_slice_is_rejected_and_pass_opens_the_next_turn(client):
     open_design(client, "2026-10-28T08:00:00")
     ross = client.get("/agent/turn", headers=auth("ross")).json()
-    claude = client.get("/agent/turn", headers=auth("claude")).json()
+    claude = client.get("/agent/turn", headers=auth("claude"))
     assert ross["to_act"] is True
-    assert ross["turns_remaining"] == 30
+    assert ross["turns_remaining"] is None
+    assert ross["turns"] is None
+    assert ross["canvas_ends_at_unix"]
+    assert ross["seconds_left_canvas"] == 7200
     assert ross["turn"] == 1
-    assert claude["to_act"] is False
+    assert claude.status_code == 403
+    assert claude.json()["error"] == "retired_seat"
     denied = client.post(
         "/agent/act",
         headers=auth("claude"),
         json={"type": "paint", "pixels": [{"x": 0, "y": 0, "color": 1}]},
     )
     assert denied.status_code == 403
-    assert denied.json()["error"] == "wrong_role"
+    assert denied.json()["error"] == "retired_seat"
 
     passed = client.post("/agent/act", headers=auth("ross"), json={"type": "pass", "note": "yield"})
     assert passed.status_code == 200, passed.text
-    assert passed.json()["turns_remaining"] == 29
+    assert passed.json()["turns_remaining"] is None
     assert passed.json()["to_act"] is False
     nxt = client.get("/agent/turn", headers=auth("ross")).json()
     assert nxt["to_act"] is True
     assert nxt["slice_index"] == 1
     assert nxt["turn"] == 2
-    assert nxt["turns_remaining"] == 29
+    assert nxt["turns_remaining"] is None
+    assert nxt["seconds_left_canvas"] == 7200
 
 
 def test_pass_done_skips_remaining_rounds(client):
@@ -79,7 +84,7 @@ def test_missed_slice_does_not_roll_the_turn_forward(client):
     ross = client.get("/agent/turn", headers=auth("ross")).json()
     assert ross["to_act"] is True
     assert ross["slice_index"] == 1
-    assert ross["turns_remaining"] == 29
+    assert ross["turns_remaining"] is None
     state = client.get("/watch/state").json()
     assert state["slices"][0]["state"] == "missed"
 
@@ -180,9 +185,10 @@ def test_new_day_is_a_blank_canvas(client):
     )
     assert old.json()["cells"] == [6]
     ross = client.get("/agent/turn", headers=auth("ross")).json()
-    claude = client.get("/agent/turn", headers=auth("claude")).json()
+    claude = client.get("/agent/turn", headers=auth("claude"))
     assert ross["to_act"] is True
-    assert claude["to_act"] is False
+    assert claude.status_code == 403
+    assert claude.json()["error"] == "retired_seat"
     assert ross["palette"][0]["id"] == 0
 
 

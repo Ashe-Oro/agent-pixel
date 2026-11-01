@@ -90,7 +90,9 @@ def test_cron_advances_a_slice_when_its_deadline_passes(client, monkeypatch):
     assert second.json()["slice_index"] == 1
     assert second.json()["current_agent_id"] == "ross"
     assert client.get("/agent/turn", headers=auth("ross")).json()["to_act"] is True
-    assert client.get("/agent/turn", headers=auth("claude")).json()["to_act"] is False
+    retired = client.get("/agent/turn", headers=auth("claude"))
+    assert retired.status_code == 403
+    assert retired.json()["error"] == "retired_seat"
 
 
 def test_wake_is_signed_once_and_a_later_slice_still_wakes(client, monkeypatch):
@@ -121,7 +123,9 @@ def test_wake_is_signed_once_and_a_later_slice_still_wakes(client, monkeypatch):
     assert payload["event"] == "slice_open"
     assert payload["slice"] == 0
     assert payload["turn"] == 1
-    assert payload["turns"] == 30
+    assert payload["turns"] is None
+    assert payload["canvas_ends_at_unix"] == int((start + timedelta(seconds=7200)).timestamp())
+    assert payload["seconds_left_canvas"] == 7200
     assert payload["seconds_per_turn"] == 180
     assert payload["pixels_per_turn"] == 16384
     assert payload["brief"] == "Warm cabin, tall pines, soft chimney smoke, night sky"
@@ -257,7 +261,7 @@ def test_canvas_locked_wakes_a_host_seat(client, monkeypatch):
     open_design(client, "2026-10-28T08:00:00")
     set_hook(client, "host", ["canvas_locked"], url="http://127.0.0.1:9/host")
     set_hook(client, "ross", ["canvas_locked"], url="http://127.0.0.1:9/ross")
-    pin(client, "2026-10-28T09:30:00")
+    pin(client, "2026-10-28T10:00:00")
     response = client.get("/cron/tick", headers=CRON)
     assert response.status_code == 200, response.text
     assert response.json()["phase"] == "locked"

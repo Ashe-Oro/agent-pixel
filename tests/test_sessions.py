@@ -26,16 +26,20 @@ def test_on_time_act_opens_the_next_artist_immediately(client):
     )
     assert painted.status_code == 200, painted.text
     ross = client.get("/agent/turn", headers=auth("ross")).json()
-    claude = client.get("/agent/turn", headers=auth("claude")).json()
+    retired = client.get("/agent/turn", headers=auth("claude"))
     assert ross["to_act"] is True
     assert ross["slice_index"] == 1
     assert ross["turn"] == 2
-    assert claude["to_act"] is False
+    assert ross["turns"] is None
+    assert retired.status_code == 403
+    assert retired.json()["error"] == "retired_seat"
     state = client.get("/watch/state").json()
     assert state["slices"][0]["state"] == "done"
     assert state["slices"][1]["state"] == "active"
     assert state["current_agent_id"] == "ross"
-    assert "3 minutes" in client.post("/host/routine/tick", headers=host()).json()["hint"]
+    hint = client.post("/host/routine/tick", headers=host()).json()["hint"]
+    assert "Turn 2" in hint
+    assert "10:00" in hint
     assert opened["day_id"] == state["day_id"]
 
 
@@ -137,7 +141,7 @@ def test_host_bonus_canvas_steps_without_a_fake_date(client):
     stepped = client.post("/host/clock", headers=host(), json={"mode": "next_slice"})
     assert stepped.status_code == 200, stepped.text
     assert client.get("/agent/turn", headers=auth("ross")).json()["slice_index"] == 2
-    assert len(client.get("/watch/state").json()["slices"]) == 30
+    assert len(client.get("/watch/state").json()["slices"]) == 3
     second = client.post("/host/canvas/new", headers=host())
     assert second.status_code == 200, second.text
     assert second.json()["day"]["ny_date"] == "2026-10-28"
@@ -352,11 +356,13 @@ def test_migration_keeps_existing_ids_without_requiring_day_one(tmp_path):
         assert bonus.json()["day"]["day_id"] == 7
         board = client.get("/watch/state").json()
         assert board["day_id"] == 7
-        assert len(board["slices"]) == 30
+        assert board["slices"] == []
         assert board["solo"] is True
-        assert board["schedule"]["rounds"] == 30
-        assert board["schedule"]["locks"] == "09:30"
+        assert board["turns"] is None
+        assert board["schedule"]["rounds"] is None
+        assert board["schedule"]["locks"] == "10:00"
         assert board["schedule"]["pixels_per_turn"] == 16384
+        assert board["schedule"]["solo_window_seconds"] == 7200
         kept = client.get("/watch/state", params={"day_id": 6}).json()
         assert len(kept["slices"]) == 12
         assert kept["schedule"]["rounds"] == 4
@@ -486,23 +492,24 @@ def test_in_progress_twelve_slice_canvas_finishes_on_its_count(tmp_path, monkeyp
         )
         assert late.status_code == 409
 
-        monkeypatch.setenv("TILE_TURNS", "4")
         opened = client.post("/host/canvas/new", headers=host())
         assert opened.status_code == 200, opened.text
         assert opened.json()["day"]["day_id"] != 4
         fresh = client.get("/watch/state").json()
         assert fresh["day_id"] != 4
         assert fresh["solo"] is True
-        assert len(fresh["slices"]) == 4
-        assert fresh["schedule"]["rounds"] == 4
-        assert fresh["schedule"]["slices"] == 4
-        assert fresh["schedule"]["locks"] == "08:12"
-        assert fresh["schedule"]["session_minutes"] == 12
+        assert fresh["turns"] is None
+        assert fresh["slices"] == []
+        assert fresh["schedule"]["locks"] == "10:00"
+        assert fresh["schedule"]["solo_window_seconds"] == 7200
         designed = client.post("/agent/design", headers=auth("design"), json=DESIGN)
         assert designed.status_code == 200, designed.text
         turn = client.get("/agent/turn", headers=auth("ross")).json()
-        assert turn["turns_remaining"] == 4
-        assert turn["round_index"] == 1
+        assert turn["turns"] is None
+        assert turn["turns_remaining"] is None
+        assert turn["canvas_ends_at_unix"]
+        assert turn["seconds_left_canvas"] > 0
+        assert turn["turn"] == 1
         history = client.get("/watch/state", params={"day_id": 4}).json()
         assert history["status"] == "locked"
         assert len(history["slices"]) == 12
@@ -584,7 +591,7 @@ def test_concurrent_writers_keep_both_updates(tmp_path, monkeypatch):
 
     def chat():
         try:
-            store_b.post_chat("grok-artist", "keeping the pines")
+            store_b.post_chat("design", "keeping the pines")
         except Exception as exc:
             errors.append(exc)
 
