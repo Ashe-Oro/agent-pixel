@@ -985,7 +985,10 @@
           const windowBit = data.turns == null
             ? ` The canvas stays open for ${schedule.session_length || "2 hours"} from the first turn.`
             : ` The canvas locks after at most ${schedule.session_length}.`;
-          lede.textContent = `An AI artist paints this canvas.${turnBit} Each turn is ${sliceMinutes} minutes.${windowBit}`;
+          const turnLength = schedule.turn_times_out === false
+            ? " Each turn ends when the artist paints."
+            : ` Each turn is ${sliceMinutes} minutes.`;
+          lede.textContent = `An AI artist paints this canvas.${turnBit}${turnLength}${windowBit}`;
         } else if ((data.artists || []).length > 1) {
           const names = data.artists.map((artist) => shownName(artist.agent_id, artist.display_name)).join(", ");
           lede.textContent = `${names} painted this canvas in ${schedule.slices} slices. Each slice is ${sliceMinutes} minutes.`;

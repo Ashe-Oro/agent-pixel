@@ -28,12 +28,26 @@ MAX_ROUNDS = 24
 UNLIMITED_SLICE_COUNT = 0
 # How long a new solo canvas stays open after turn 1 starts. Default 2 hours.
 DEFAULT_SOLO_WINDOW = 7200
+# How long a new canvas waits for the design before the fallback palette.
+DEFAULT_DESIGN_WAIT = 3600
 MIN_SOLO_WINDOW = 1
 MAX_SOLO_WINDOW = 7 * 24 * 3600
 # Parser ceiling for slice indices on a fast solo canvas. Not a turn cap.
 MAX_ADDRESSED_TURNS = 5000
 # Unique cells Ross may place in one turn, including overwrites of his own pixels.
 DEFAULT_TURN_PIXELS = 16384
+# How a solo canvas paces its turns. "timed" closes an idle turn after
+# SLICE_SECONDS and opens the next. "await_act" keeps one turn open until the
+# painter paints or passes, capped only by the canvas window.
+PACING_TIMED = "timed"
+PACING_AWAIT_ACT = "await_act"
+PACINGS = (PACING_TIMED, PACING_AWAIT_ACT)
+# Which turns wake the painter on an await_act canvas. "each" sends one
+# slice_open per turn. "first" sends it for turn 1 only, because every later
+# turn opens in answer to the painter's own act.
+TURN_WAKES_EACH = "each"
+TURN_WAKES_FIRST = "first"
+TURN_WAKES = (TURN_WAKES_EACH, TURN_WAKES_FIRST)
 ARTISTS = ("claude", "grok-artist", "openai")
 SOLO_PAINTER = "ross"
 # Canvases opened before TILE_ROUNDS existed ran four rounds, twelve slices.
@@ -202,10 +216,20 @@ def redo_overfill(before: bytes, collapsed: list[tuple[int, int, int]]) -> str |
 def design_wait_seconds() -> int:
     """How long a new canvas waits for Ross's design. ``TILE_DESIGN_WAIT_SECONDS``.
 
-    Default 900 (fifteen minutes), so he can study references before the
-    fallback palette. ``0`` applies the fallback design on the next check.
+    Default 3600 (one hour), so the artist can study references and build the
+    image before the fallback palette. ``0`` applies the fallback design on
+    the next check.
     """
-    return env_seconds("TILE_DESIGN_WAIT_SECONDS", 900)
+    return env_seconds("TILE_DESIGN_WAIT_SECONDS", DEFAULT_DESIGN_WAIT)
+
+
+def default_solo_pacing() -> str:
+    """Pacing a solo canvas gets when its design does not name one. ``TILE_SOLO_PACING``.
+
+    ``timed`` (the default) or ``await_act``. Anything else uses ``timed``.
+    """
+    raw = os.environ.get("TILE_SOLO_PACING", "").strip().lower()
+    return raw if raw in PACINGS else PACING_TIMED
 
 
 def tile_rounds() -> int:
@@ -629,6 +653,7 @@ def walk_timed_solo(
     now: datetime,
     window_end: datetime,
     done_index: int | None = None,
+    await_act: bool = False,
 ) -> SessionClock:
     """Ross's open-ended turn clock, capped by ``window_end``.
 
@@ -636,6 +661,9 @@ def walk_timed_solo(
     and is clamped so it cannot run past ``window_end``. A paint or pass
     closes the turn at that instant and opens the next one. ``done_index``
     is the turn Ross finished on; nothing opens after it.
+
+    ``await_act`` drops the per-turn timeout: a turn stays open until the
+    painter acts, and only ``window_end`` can close it unused.
     """
     start = opens_at.astimezone(NY)
     end = window_end.astimezone(NY)
@@ -656,7 +684,7 @@ def walk_timed_solo(
         remaining = (end - cursor).total_seconds()
         if remaining <= 0:
             break
-        span = SLICE_SECONDS if remaining > SLICE_SECONDS else remaining
+        span = remaining if await_act or remaining <= SLICE_SECONDS else SLICE_SECONDS
         deadline = cursor + timedelta(seconds=span)
         raw = actions.get(index)
         raw_local = raw.astimezone(NY) if raw is not None else None

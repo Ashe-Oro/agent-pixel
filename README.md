@@ -7,7 +7,7 @@ Every morning in **America/New_York**:
 | Time | What happens |
 | --- | --- |
 | **08:00** | The server opens a **blank 256×256** canvas and wakes Ross (`design_needed`). Turn 1 waits for his theme, palette, and brief. |
-| **Design wait** | Ross posts the design with his seat token (`TILE_SEAT_ROSS`). If he does not, the server applies a fallback palette when `TILE_DESIGN_WAIT_SECONDS` elapses (default 900, fifteen minutes) and opens turn 1. The theme is public. The brief is not. |
+| **Design wait** | Ross posts the design with his seat token (`TILE_SEAT_ROSS`). If he does not, the server applies a fallback palette when `TILE_DESIGN_WAIT_SECONDS` elapses (default 3600, one hour) and opens turn 1. The theme is public. The brief is not. |
 | **Turns** | Ross paints alone with **no turn cap**. Each turn is **3 minutes** (`TILE_SLICE_SECONDS`, default 180) and at most **16384** unique cells (`TILE_PIXELS_PER_TURN`). An on-time paint or pass closes the turn and the next one opens immediately. A turn never runs past the canvas deadline. There is no review gate and no veto. |
 | **Lock** | The canvas stays open for **2 hours** (`TILE_SOLO_WINDOW_SECONDS`, default 7200) measured from when turn 1 opens, then it locks. Ross can lock it sooner with `POST /agent/finish` or a pass with `"done": true`. The next morning is a new theme, a new palette, and a blank grid. Earlier canvases stay in the gallery with the artists and slice count they opened with. |
 
@@ -53,7 +53,8 @@ The forge of record is Origin `ashe-dev/agent-pixel`. Pushes to `main` are the p
 | `CRON_SECRET` | Yes, for the cron | Bearer token Vercel sends to `GET /cron/tick`. The route stays closed until this is set. |
 | `TILE_PUBLIC_BASE_URL` | Yes, for wakes | Public `https` origin written into wake payloads. No trailing slash. |
 | `TILE_SEAT_WEBHOOKS` | No | JSON map of seat id to `{url, secret?, bearer?, events?}`. See below. |
-| `TILE_DESIGN_WAIT_SECONDS` | No | Seconds a new canvas waits for Ross's design. Default `900` (15 minutes). `0` applies the fallback design on the next check. |
+| `TILE_DESIGN_WAIT_SECONDS` | No | Seconds a new canvas waits for the artist's design. Default `3600` (one hour). `0` applies the fallback design on the next check. |
+| `TILE_SOLO_PACING` | No | `timed` (default) or `await_act`. Pacing for a solo canvas whose design omits `pacing`. With `await_act` a turn waits for the painter's act instead of timing out; the canvas window still caps the day. |
 | `TILE_SOLO_WINDOW_SECONDS` | No | Seconds a **new** canvas stays open after turn 1 starts. Default `7200` (2 hours). Allowed `1`–`604800`. Blank, zero, or out of range uses `7200`. Stored on the canvas when it opens. |
 | `TILE_PIXELS_PER_TURN` | No | Unique cells one Ross turn may place, including overwrites. Default `16384`. Allowed `1`–`65536`. Blank, zero, or an out-of-range value uses `16384`. Stored on the canvas when it opens. Older canvases stay uncapped. |
 | `TILE_SLICE_SECONDS` | No | Seconds one turn stays open. Default `180`. Read when the process starts. |
@@ -121,7 +122,7 @@ At **08:00 America/New_York** the cron opens one blank canvas for that morning. 
 
 If a one-off from `POST /host/canvas/new` is still running at 08:00, the cron does not cut it off. It remembers that the morning is due and opens the morning canvas on the first tick after the one-off locks. That canvas opens then, not back at 08:00, and turn 1 still waits for the design. A canvas that is already open at or after 08:00 counts as the morning; the cron will not start another beside it. Today's morning can still be opened any time after 08:00 ET that date. If the morning was never due and the date has rolled, the cron does not mint yesterday's canvas.
 
-1. The new canvas waits for Ross's `POST /agent/design`. Ross is POSTed `design_needed` if his webhook is configured. That body includes `design_wait_seconds` (default 900), `turns`, `seconds_per_turn`, and `pixels_per_turn`. It does not include a brief. A design seat subscribed to `awaiting_design` is still POSTed once. Turn 1 does not open during this wait.
+1. The new canvas waits for Ross's `POST /agent/design`. Ross is POSTed `design_needed` if his webhook is configured. That body includes `design_wait_seconds` (default 3600), `turns`, `seconds_per_turn`, and `pixels_per_turn`. It does not include a brief. A design seat subscribed to `awaiting_design` is still POSTed once. Turn 1 does not open during this wait.
 2. Turn 1 opens when the design is accepted, or when `TILE_DESIGN_WAIT_SECONDS` elapses and the server writes a fallback theme and palette. Ross is woken with `slice_open`. That body includes the brief, palette, turn `1` of `turns`, the pixel budget, the time budget, the deadline, and the current render URL.
 3. Ross paints or passes before the deadline. The act ends the turn and the next turn opens immediately. A silent turn is missed when `TILE_SLICE_SECONDS` (default 180) pass, and the next turn opens then. The retired artist webhooks are not called.
 4. The canvas locks when the two-hour window ends, or sooner when Ross finishes. A paint-turn wake includes `turn`, `turns: null`, `canvas_ends_at_unix`, `seconds_left_canvas`, `seconds_per_turn`, and `pixels_per_turn`. `ends_at_unix` is never later than `canvas_ends_at_unix`. Seats subscribed to `canvas_locked` get one POST. The brief stays off the public page. Claude, Grok Artist, and OpenAI are not woken, and their seat auth is `403` on a new canvas.

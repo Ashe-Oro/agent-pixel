@@ -25,7 +25,7 @@ def test_new_canvas_is_thirty_ross_turns(client, monkeypatch):
     wake = payloads(seen)[0]
     assert wake["event"] == "design_needed"
     assert wake["seat"] == "ross"
-    assert wake["design_wait_seconds"] == 900
+    assert wake["design_wait_seconds"] == 3600
     assert wake["turns"] is None
     assert wake["solo_window_seconds"] == 7200
     assert wake["seconds_per_turn"] == 180
