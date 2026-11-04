@@ -223,6 +223,8 @@ def plan_wakes(
     unlimited: bool = False,
     canvas_ends_at: datetime | None = None,
     solo_window: int | None = None,
+    await_act: bool = False,
+    first_turn_wake_only: bool = False,
 ) -> list[WakeIntent]:
     """Wakes that are still in their delivery window.
 
@@ -235,6 +237,12 @@ def plan_wakes(
     ``canvas_locked`` stays eligible for one slice length.
     ``design_needed`` and ``awaiting_design`` are only while the canvas is open
     and has no theme. Neither of those bodies includes a brief.
+
+    ``await_act`` marks a solo canvas whose turns wait for the painter. Each
+    turn index still gets at most one ``slice_open``, and an idle turn never
+    rolls over, so no repeat wakes come while it waits. With
+    ``first_turn_wake_only`` only turn 1 is announced: later turns open in
+    answer to the painter's own act, and the act response already says so.
     """
     if archived or not hooks:
         return []
@@ -280,7 +288,9 @@ def plan_wakes(
             if solo and slice_index >= 0:
                 payload["turn"] = slice_index + 1
                 payload["turns"] = None if unlimited else len(slices)
-                payload["seconds_per_turn"] = SLICE_SECONDS
+                payload["seconds_per_turn"] = None if await_act else SLICE_SECONDS
+                payload["pacing"] = "await_act" if await_act else "timed"
+                payload["turn_times_out"] = not await_act
                 payload["pixels_per_turn"] = pixels_per_turn
                 payload["palette"] = palette or []
                 if unlimited and canvas_ends_at is not None:
@@ -336,7 +346,8 @@ def plan_wakes(
     if phase == "during" and index is not None and order:
         seat = artist_on_slice(order, index)
         mark = slices[index]
-        for hook in by_event["slice_open"]:
+        quiet = solo and await_act and first_turn_wake_only and index > 0
+        for hook in [] if quiet else by_event["slice_open"]:
             if hook.seat_id == seat:
                 add(hook, "slice_open", index, mark.deadline, redo=mark.redo)
         if index > 0:

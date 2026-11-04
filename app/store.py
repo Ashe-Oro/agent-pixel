@@ -73,6 +73,13 @@ from app.schedule import (
     solo_window_seconds,
     walk_session,
     walk_timed_solo,
+    PACING_AWAIT_ACT,
+    PACING_TIMED,
+    PACINGS,
+    TURN_WAKES,
+    TURN_WAKES_EACH,
+    TURN_WAKES_FIRST,
+    default_solo_pacing,
 )
 
 KIND_MORNING = "morning"
@@ -101,7 +108,9 @@ _DAYS_COLUMNS = f"""
               slice_count INTEGER NOT NULL DEFAULT {LEGACY_SLICE_COUNT},
               canvas_rev INTEGER NOT NULL DEFAULT 0,
               turn_pixels INTEGER,
-              solo_window_seconds INTEGER
+              solo_window_seconds INTEGER,
+              solo_pacing TEXT,
+              turn_wakes TEXT
 """
 
 # Latest-stroke cells stay in TurnView only while the list is small.
@@ -420,6 +429,7 @@ class Store:
         self._ensure_slice_count()
         self._ensure_turn_pixels()
         self._ensure_solo_window()
+        self._ensure_pacing_columns()
         self._ensure_canvas_rev()
         self._ensure_action_history()
         cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(days)")}
@@ -571,6 +581,47 @@ class Store:
             return
         self.conn.execute("ALTER TABLE days ADD COLUMN solo_window_seconds INTEGER")
         self.dirty = True
+
+    def _ensure_pacing_columns(self) -> None:
+        """Per-canvas turn pacing and turn-wake mode. NULL on older rows means timed, each."""
+        cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(days)")}
+        for name in ("solo_pacing", "turn_wakes"):
+            if name in cols:
+                continue
+            self.conn.execute(f"ALTER TABLE days ADD COLUMN {name} TEXT")
+            self.dirty = True
+
+    def _pacing(self, day: sqlite3.Row | None) -> str:
+        """``await_act`` only on an unlimited solo canvas that stored it. Else ``timed``."""
+        if day is None or "solo_pacing" not in day.keys():
+            return PACING_TIMED
+        if day["solo_pacing"] != PACING_AWAIT_ACT:
+            return PACING_TIMED
+        if not self._is_unlimited(day) or not self._is_solo_day(day):
+            return PACING_TIMED
+        return PACING_AWAIT_ACT
+
+    def _awaits_act(self, day: sqlite3.Row | None) -> bool:
+        return self._pacing(day) == PACING_AWAIT_ACT
+
+    def _turn_wakes(self, day: sqlite3.Row | None) -> str:
+        if not self._awaits_act(day):
+            return TURN_WAKES_EACH
+        if day["turn_wakes"] == TURN_WAKES_FIRST:
+            return TURN_WAKES_FIRST
+        return TURN_WAKES_EACH
+
+    def _seconds_per_turn(self, day: sqlite3.Row | None) -> int | None:
+        """None when a turn waits for the painter instead of timing out."""
+        return None if self._awaits_act(day) else SLICE_SECONDS
+
+    def _pacing_fields(self, day: sqlite3.Row | None) -> dict[str, Any]:
+        awaits = self._awaits_act(day)
+        return {
+            "pacing": self._pacing(day),
+            "turn_times_out": not awaits,
+            "turn_wakes": self._turn_wakes(day),
+        }
 
     def _window_seconds(self, day: sqlite3.Row | None) -> int:
         if day is not None and "solo_window_seconds" in day.keys() and day["solo_window_seconds"]:
@@ -1057,6 +1108,7 @@ class Store:
             now,
             self._canvas_ends(day),
             self._done_index(day["id"]),
+            await_act=self._awaits_act(day),
         )
 
     def _ensure_design_timeout(self) -> None:
@@ -1102,6 +1154,8 @@ class Store:
         theme: str,
         brief: str,
         palette: list[dict[str, Any]],
+        pacing: str | None = None,
+        turn_wakes: str | None = None,
     ) -> list[str]:
         """Write the theme and start slice 0 at ``now``. Caller holds the write.
 
@@ -1119,11 +1173,16 @@ class Store:
                 bool(settings["rotate"]),
             )
         stamp = int(now.timestamp())
+        chosen = pacing or default_solo_pacing()
+        if not (is_solo_order(order) and self._is_unlimited(day)):
+            chosen = PACING_TIMED
+        wakes = turn_wakes if chosen == PACING_AWAIT_ACT and turn_wakes else TURN_WAKES_EACH
         cur = self.conn.execute(
             """
             UPDATE days
             SET theme = ?, brief = ?, palette_json = ?, canvas = ?,
-                artist_order_json = ?, designed_at = ?, opens_at = ?
+                artist_order_json = ?, designed_at = ?, opens_at = ?,
+                solo_pacing = ?, turn_wakes = ?
             WHERE id = ? AND (theme IS NULL OR theme = '')
             """,
             (
@@ -1134,6 +1193,8 @@ class Store:
                 json.dumps(order),
                 stamp,
                 stamp,
+                chosen,
+                wakes,
                 day["id"],
             ),
         )
@@ -1704,6 +1765,7 @@ class Store:
         if payload.get("type") != "design":
             raise ApiError(400, "bad_action", "Design payload type must be 'design'.")
         theme, brief, palette = _parse_design(payload)
+        pacing, turn_wakes = _parse_pacing(payload)
         saved: dict[str, Any] = {}
 
         def mutate() -> None:
@@ -1726,7 +1788,13 @@ class Store:
                     raise ApiError(409, "morning_locked", "This session is locked.")
                 if day["theme"]:
                     raise ApiError(409, "already_designed", "Today already has a theme and palette.")
-                order = self._store_design(day, now, theme, brief, palette)
+                if pacing == PACING_AWAIT_ACT and not (self._is_solo_day(day) and self._is_unlimited(day)):
+                    raise ApiError(
+                        400,
+                        "bad_pacing",
+                        "await_act pacing is only for a canvas one artist paints without a turn cap.",
+                    )
+                order = self._store_design(day, now, theme, brief, palette, pacing, turn_wakes)
                 self.conn.commit()
                 saved["day_id"] = day["id"]
                 saved["day_index"] = day["day_index"]
@@ -1741,7 +1809,10 @@ class Store:
         self._dispatch_quietly()
         order = saved["order"]
         index = saved["index"]
+        fresh = self.day_by_id(saved["day_id"])
         return {
+            **self._pacing_fields(fresh),
+            "seconds_per_turn": self._seconds_per_turn(fresh),
             "ok": True,
             "mural_id": f"day-{saved['day_index']}",
             "day_id": saved["day_id"],
@@ -1929,7 +2000,21 @@ class Store:
             "pixels_remaining_turn": 0,
             "turns_remaining": self._turns_remaining(fresh, agent_id, self.now()),
             "to_act": False,
+            **self._next_turn_fields(fresh, agent_id),
         }
+
+    def _next_turn_fields(self, day: sqlite3.Row, agent_id: str) -> dict[str, Any]:
+        """What opened after this act, so an await_act painter can keep going without a wake."""
+        with self.lock:
+            now = self.now()
+            phase, index = self._phase_for(day, now)
+            open_now = phase == "during" and index is not None and self.can_act(day, agent_id, now)
+            return {
+                **self._pacing_fields(day),
+                "next_turn_open": open_now,
+                "next_slice_index": index if open_now else None,
+                "next_turn": (index + 1) if open_now else None,
+            }
 
     def can_act(self, day: sqlite3.Row | None, agent_id: str, now: datetime) -> bool:
         """Whether this seat may paint or pass the live slice.
@@ -2155,7 +2240,8 @@ class Store:
             "turn": (index + 1) if index is not None else None,
             "turns": None if day is not None and self._is_unlimited(day) else total,
             "pixels_per_turn": budget,
-            "seconds_per_turn": SLICE_SECONDS,
+            "seconds_per_turn": self._seconds_per_turn(day),
+            **self._pacing_fields(day),
             "render_url": _png_url(day, 2),
             **(self._window_fields(day, now) if day is not None else {}),
         }
@@ -2166,7 +2252,8 @@ class Store:
             "solo": True,
             "turns": None if self._is_unlimited(day) else self._slice_total(day),
             "pixels_per_turn": self._turn_pixels(day),
-            "seconds_per_turn": SLICE_SECONDS,
+            "seconds_per_turn": self._seconds_per_turn(day),
+            **self._pacing_fields(day),
             "design_wait_seconds": design_wait_seconds(),
             "design_deadline_unix": int(deadline.timestamp()) if deadline else None,
         }
@@ -2299,6 +2386,8 @@ class Store:
             unlimited=self._is_unlimited(day),
             canvas_ends_at=self._canvas_ends(day) if self._is_unlimited(day) and day["theme"] else None,
             solo_window=self._window_seconds(day) if self._is_unlimited(day) else None,
+            await_act=self._awaits_act(day),
+            first_turn_wake_only=self._turn_wakes(day) == TURN_WAKES_FIRST,
         )
 
     def _post_and_finish(self, intent: WakeIntent) -> dict[str, Any]:
@@ -2558,7 +2647,15 @@ class Store:
                 )
             elif solo:
                 turn = (index + 1) if index is not None else 0
-                if self._is_unlimited(day) and day["theme"]:
+                if self._awaits_act(day) and day["theme"]:
+                    ends = self._canvas_ends(day)
+                    hint = (
+                        f"GET /agent/turn as ross, then POST /agent/act with one paint or pass. Turn {turn}. "
+                        f"This turn has no timer: it waits for your act. "
+                        f"The canvas locks at {label_hhmm(ends)} ET, or sooner if you finish. "
+                        f"POST /agent/finish locks it now."
+                    )
+                elif self._is_unlimited(day) and day["theme"]:
                     ends = self._canvas_ends(day)
                     hint = (
                         f"GET /agent/turn as ross, then POST /agent/act with one paint or pass "
@@ -2807,12 +2904,16 @@ class Store:
                 palette,
             ),
             "clock": clock,
-            "schedule": _schedule_meta(
-                None if self._is_unlimited(featured) else total,
-                solo=solo,
-                turn_pixels=budget,
-                unlimited=self._is_unlimited(featured),
-            ),
+            "schedule": {
+                **_schedule_meta(
+                    None if self._is_unlimited(featured) else total,
+                    solo=solo,
+                    turn_pixels=budget,
+                    unlimited=self._is_unlimited(featured),
+                ),
+                "pacing": self._pacing(featured),
+                "turn_times_out": not self._awaits_act(featured),
+            },
             **self._window_fields(featured, now),
             "archive": archive,
             "viewing_archive": bool(day_id is not None and default_feature is not None and featured["id"] != default_feature["id"]),
@@ -3719,6 +3820,19 @@ def _collapse(pixels: list[dict[str, int]]) -> list[tuple[int, int, int]]:
             order.append(key)
         colors[key] = pixel["color"]
     return [(x, y, colors[(x, y)]) for x, y in order]
+
+
+def _parse_pacing(payload: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Optional ``pacing`` and ``turn_wakes`` on a design. None means the server default."""
+    pacing = payload.get("pacing")
+    if pacing is not None and pacing not in PACINGS:
+        raise ApiError(400, "bad_pacing", f"pacing must be one of: {', '.join(PACINGS)}.")
+    wakes = payload.get("turn_wakes")
+    if wakes is not None and wakes not in TURN_WAKES:
+        raise ApiError(400, "bad_pacing", f"turn_wakes must be one of: {', '.join(TURN_WAKES)}.")
+    if wakes == TURN_WAKES_FIRST and pacing != PACING_AWAIT_ACT and default_solo_pacing() != PACING_AWAIT_ACT:
+        raise ApiError(400, "bad_pacing", "turn_wakes first needs pacing await_act.")
+    return pacing, wakes
 
 
 def _parse_design(payload: dict[str, Any]) -> tuple[str, str, list[dict[str, Any]]]:

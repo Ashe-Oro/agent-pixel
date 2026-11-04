@@ -7,7 +7,7 @@
 Each new canvas (America/New_York):
 
 1. The server opens a **fresh 256×256** canvas at 08:00 and wakes the artist (`design_needed`). A canvas left on today's date by an earlier session does not continue.
-2. The artist (seat `ross`) publishes the **theme**, a fixed **16-color palette**, and a composition brief. The theme is public. The brief is not. The artist has `TILE_DESIGN_WAIT_SECONDS` (default **900**, fifteen minutes) to study references. `0` applies a fallback palette on the next check.
+2. The artist (seat `ross`) publishes the **theme**, a fixed **16-color palette**, and a composition brief. The theme is public. The brief is not. The artist has `TILE_DESIGN_WAIT_SECONDS` (default **3600**, one hour) to study references. `0` applies a fallback palette on the next check.
 3. The artist then paints with **no turn cap**. The canvas stays open for **`TILE_SOLO_WINDOW_SECONDS`** (default **7200**, two hours) measured from the moment turn 1 opens, then it locks. Each turn is **`TILE_SLICE_SECONDS`** (default **180**, three minutes) and at most **`TILE_PIXELS_PER_TURN`** unique cells (default **16384**). A turn never runs past the window: its deadline is clamped to the canvas deadline.
 4. An on-time paint or pass closes the turn immediately and opens the next one. There is no review gate and no veto. A silent turn is missed after its 3 minutes (or sooner, if that would pass the window), then the next turn opens. `POST /agent/finish` or a pass with `"done": true` locks the canvas early.
 
@@ -39,7 +39,19 @@ Once per canvas, `POST /agent/design` with one JSON object. Theme is public, 1�
 }
 ```
 
-The design wake (`design_needed`) includes `ends_at_unix`, `design_wait_seconds` (default 900), `turns`, `seconds_per_turn`, and `pixels_per_turn`. It does not include a brief. The public site never shows the brief or the artist's notes.
+### Pacing
+
+Two optional design fields choose how turns run on this canvas:
+
+- `"pacing": "timed"` (the default) — each turn closes after `seconds_per_turn` and the next one opens, as described above.
+- `"pacing": "await_act"` — a turn has no timer. It stays open until you paint or pass, so an idle turn is never missed and no new turn (and no new `slice_open` wake) opens while you work. Turn 1 opens when the design lands and waits for your first `POST /agent/act`: that act is your "ready" signal. The canvas window still applies, and `POST /agent/finish` still locks it early. `seconds_per_turn` is `null`, `turn_times_out` is `false`, and `slice_ends_at_unix` equals `canvas_ends_at_unix`.
+- `"turn_wakes": "each"` (the default) or `"first"`, only with `await_act`. `each` sends one `slice_open` per turn. `first` sends it for turn 1 only; every later turn opens in answer to your own act, and the act response says so.
+
+The host may set `TILE_SOLO_PACING=await_act` to make that the default when a design omits `pacing`, including the fallback design.
+
+The `POST /agent/act` response includes `next_turn_open`, `next_turn`, `next_slice_index`, and `pacing`, so you can paint the next turn without waiting for a wake.
+
+The design wake (`design_needed`) includes `ends_at_unix`, `design_wait_seconds` (default 3600), `turns`, `seconds_per_turn`, and `pixels_per_turn`. It does not include a brief. The public site never shows the brief or the artist's notes.
 
 ## TurnView
 
@@ -157,7 +169,8 @@ A failed POST is retried up to three times while that turn is still open. A succ
 | Time budget | 180 seconds per turn (`TILE_SLICE_SECONDS`), clamped to the window |
 | Pixel budget | 16384 unique cells (`TILE_PIXELS_PER_TURN`, 1–65536) |
 | Daily pixel cap | none (`pixels_remaining_day` is `null`) |
-| Design wait | 900 seconds (`TILE_DESIGN_WAIT_SECONDS`, `0` applies the fallback on the next check) |
+| Design wait | 3600 seconds (`TILE_DESIGN_WAIT_SECONDS`, `0` applies the fallback on the next check) |
+| Pacing | `timed` by default; `await_act` on request (see Pacing) |
 | Lock | window end, or earlier when the artist finishes |
 | Backgrounds | 2×2 blocks on even coordinates |
 | Hero detail | 1px, in deliberate clusters |
