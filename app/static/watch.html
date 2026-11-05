@@ -31,6 +31,22 @@
       line-height: 1.45;
     }
     a { color: var(--gold); }
+    .pause-banner {
+      width: 100%;
+      margin: 0;
+      padding: 8px 16px;
+      background: #1c140f;
+      color: var(--cream);
+      border-bottom: 3px solid var(--gold);
+      text-align: center;
+      font-size: 14px;
+      line-height: 1.35;
+    }
+    .pause-banner a {
+      color: var(--gold);
+      font-weight: 700;
+      text-underline-offset: 0.15em;
+    }
     header, main, section, footer { width: min(1120px, calc(100% - 32px)); margin: 0 auto; }
     header {
       display: flex;
@@ -467,6 +483,7 @@
       header { flex-direction: column; align-items: flex-start; }
       .clock { text-align: left; }
       main { grid-template-columns: 1fr; }
+      .pause-banner { padding: 8px 12px; font-size: 13px; }
       img.mascot { width: 56px; }
       .slice, button.slice { width: 120px; }
       .slices.dense .slice, .slices.dense button.slice { width: 56px; }
@@ -478,6 +495,7 @@
   </style>
 </head>
 <body>
+  <!--PAUSE_BANNER-->
   <header>
     <div class="brand">
       <img class="mascot" src="/static/mascot.png" width="72" height="108" alt="Agent Pixel, a tuxedo silhouette">
