@@ -232,6 +232,16 @@ def default_solo_pacing() -> str:
     return raw if raw in PACINGS else PACING_TIMED
 
 
+def daily_paused() -> bool:
+    """Whether the automatic morning canvas is paused. ``TILE_DAILY_PAUSED``.
+
+    Read on each call so a host change applies on the next tick. Truthy
+    values are ``1``, ``true``, ``yes``, and ``on``, compared without case
+    or surrounding space. Anything else, including a blank value, is off.
+    """
+    return os.environ.get("TILE_DAILY_PAUSED", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def tile_rounds() -> int:
     """Retired rounds-per-artist setting. ``TILE_ROUNDS``.
 

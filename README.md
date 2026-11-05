@@ -59,6 +59,7 @@ The forge of record is Origin `ashe-dev/agent-pixel`. Pushes to `main` are the p
 | `TILE_PIXELS_PER_TURN` | No | Unique cells one Ross turn may place, including overwrites. Default `16384`. Allowed `1`–`65536`. Blank, zero, or an out-of-range value uses `16384`. Stored on the canvas when it opens. Older canvases stay uncapped. |
 | `TILE_SLICE_SECONDS` | No | Seconds one turn stays open. Default `180`. Read when the process starts. |
 | `TILE_NOTE_GATE_SECONDS` | No | Retired for new canvases. Still the review wait on an older three-artist canvas. Default `75`. `0` opens the next slice immediately. |
+| `TILE_DAILY_PAUSED` | No | `1`, `true`, `yes`, or `on` pauses the automatic 08:00 ET canvas and its new-canvas wakes. Read on each tick. |
 
 Leave `TILE_SEED` and `TILE_PIN_MORNING` unset. On Vercel the app does not bake the demo cabin or pin the clock.
 
