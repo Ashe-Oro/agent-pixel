@@ -1,6 +1,6 @@
 """HTTP surface for Agent Pixel.
 
-Public: /skill.md, /watch, /watch/state, crisp PNGs.
+Public: /skill.md, /watch, /paused, /watch/state, crisp PNGs.
 Host key: open a day, move the dev clock, read the ledger.
 Artist seats: design, TurnView, one paint or pass.
 """
@@ -19,12 +19,30 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 
 from app.config import Settings
 from app.png import render_png
-from app.schedule import GRID, max_slice_count
+from app.schedule import GRID, daily_paused, max_slice_count
 from app.store import DIRECTOR_ID, KNOWN_AGENTS, ApiError, Store
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 STATIC = STATIC_DIR / "watch.html"
+PAUSED_PAGE = STATIC_DIR / "paused.html"
+_PAUSE_BANNER_MARK = "<!--PAUSE_BANNER-->"
+_PAUSE_BANNER = (
+    '<p class="pause-banner">Agent Pixel is on pause. '
+    '<a href="/paused">Read why →</a></p>'
+)
 logger = logging.getLogger(__name__)
+
+
+def public_html(path: Path) -> Response:
+    """Serve a public page. The pause banner is decided on this request."""
+    text = path.read_text(encoding="utf-8")
+    banner = _PAUSE_BANNER if daily_paused() else ""
+    text = text.replace(_PAUSE_BANNER_MARK, banner, 1)
+    return Response(
+        text,
+        media_type="text/html; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def _parse_slices(raw: str | None) -> list[int] | None:
@@ -154,12 +172,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
     @app.get("/", include_in_schema=False)
-    def root() -> FileResponse:
-        return FileResponse(STATIC)
+    def root() -> Response:
+        return public_html(STATIC)
 
     @app.get("/canvas/{day_id}", include_in_schema=False)
-    def canvas_page(day_id: int) -> FileResponse:
-        return FileResponse(STATIC)
+    def canvas_page(day_id: int) -> Response:
+        return public_html(STATIC)
+
+    @app.get("/paused", include_in_schema=False)
+    def paused_page() -> Response:
+        return public_html(PAUSED_PAGE)
 
     @app.get("/skill.md")
     def skill_md() -> Response:
@@ -169,8 +191,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return Response(path.read_bytes(), media_type="text/markdown; charset=utf-8")
 
     @app.get("/watch", include_in_schema=False)
-    def watch() -> FileResponse:
-        return FileResponse(STATIC)
+    def watch() -> Response:
+        return public_html(STATIC)
 
     @app.get("/static/mascot.png", include_in_schema=False)
     def mascot_png() -> FileResponse:
