@@ -1,6 +1,6 @@
-"""Pause banner on public pages, and the /paused note."""
+"""Pause banner on the homepage only, and the /paused note."""
 
-PAGES = ("/", "/watch", "/canvas/1")
+OTHER_PAGES = ("/watch", "/canvas/1", "/paused")
 BANNER = "Agent Pixel is on pause."
 LINK = 'href="/paused">Read why →</a>'
 
@@ -26,32 +26,44 @@ NOTE_LINES = (
 )
 
 
-def test_banner_shows_on_public_pages_when_paused(client, monkeypatch):
+def test_banner_shows_only_on_homepage_when_paused(client, monkeypatch):
     monkeypatch.setenv("TILE_DAILY_PAUSED", "yes")
-    for path in (*PAGES, "/paused"):
+    home = client.get("/")
+    assert home.status_code == 200
+    assert home.headers["content-type"].startswith("text/html")
+    assert home.headers["cache-control"] == "no-store"
+    assert BANNER in home.text
+    assert LINK in home.text
+    assert 'class="pause-banner"' in home.text
+    for path in OTHER_PAGES:
         page = client.get(path)
         assert page.status_code == 200, path
-        assert page.headers["content-type"].startswith("text/html")
-        assert page.headers["cache-control"] == "no-store"
-        assert BANNER in page.text
-        assert LINK in page.text
-        assert 'class="pause-banner"' in page.text
-
-
-def test_banner_is_absent_when_not_paused(client, monkeypatch):
-    monkeypatch.delenv("TILE_DAILY_PAUSED", raising=False)
-    for path in PAGES:
-        page = client.get(path)
-        assert page.status_code == 200, path
-        assert BANNER not in page.text
         assert "Read why" not in page.text
         assert 'class="pause-banner"' not in page.text
+    # / and /watch share watch.html. The path, not the file, decides.
+    watch = client.get("/watch").text
+    assert watch == home.text.replace(
+        '<p class="pause-banner">Agent Pixel is on pause. <a href="/paused">Read why →</a></p>',
+        "",
+    )
+
+
+def test_banner_is_absent_on_homepage_when_not_paused(client, monkeypatch):
+    monkeypatch.delenv("TILE_DAILY_PAUSED", raising=False)
+    home = client.get("/")
+    assert home.status_code == 200
+    assert BANNER not in home.text
+    assert "Read why" not in home.text
+    assert 'class="pause-banner"' not in home.text
     monkeypatch.setenv("TILE_DAILY_PAUSED", "OFF")
-    assert "Read why" not in client.get("/watch").text
+    assert "Read why" not in client.get("/").text
     monkeypatch.setenv("TILE_DAILY_PAUSED", "1")
     assert LINK in client.get("/").text
-    monkeypatch.setenv("TILE_DAILY_PAUSED", "0")
+    assert "Read why" not in client.get("/watch").text
     assert "Read why" not in client.get("/canvas/3").text
+    assert "Read why" not in client.get("/paused").text
+    monkeypatch.setenv("TILE_DAILY_PAUSED", "0")
+    assert "Read why" not in client.get("/").text
 
 
 def test_paused_page_renders_the_note(client, monkeypatch):
@@ -70,3 +82,5 @@ def test_paused_page_renders_the_note(client, monkeypatch):
     assert "Ross" not in body
     assert "TILE_" not in body
     assert "Read why" not in body
+    monkeypatch.setenv("TILE_DAILY_PAUSED", "1")
+    assert client.get("/paused").text == body

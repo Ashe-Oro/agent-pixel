@@ -33,11 +33,11 @@ _PAUSE_BANNER = (
 logger = logging.getLogger(__name__)
 
 
-def public_html(path: Path) -> Response:
-    """Serve a public page. The pause banner is decided on this request."""
+def public_html(request: Request, path: Path) -> Response:
+    """Serve a public page. The pause banner is only on the exact path ``/``."""
     text = path.read_text(encoding="utf-8")
-    banner = _PAUSE_BANNER if daily_paused() else ""
-    text = text.replace(_PAUSE_BANNER_MARK, banner, 1)
+    show = request.url.path == "/" and daily_paused()
+    text = text.replace(_PAUSE_BANNER_MARK, _PAUSE_BANNER if show else "", 1)
     return Response(
         text,
         media_type="text/html; charset=utf-8",
@@ -172,16 +172,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
     @app.get("/", include_in_schema=False)
-    def root() -> Response:
-        return public_html(STATIC)
+    def root(request: Request) -> Response:
+        return public_html(request, STATIC)
 
     @app.get("/canvas/{day_id}", include_in_schema=False)
-    def canvas_page(day_id: int) -> Response:
-        return public_html(STATIC)
+    def canvas_page(day_id: int, request: Request) -> Response:
+        return public_html(request, STATIC)
 
     @app.get("/paused", include_in_schema=False)
-    def paused_page() -> Response:
-        return public_html(PAUSED_PAGE)
+    def paused_page(request: Request) -> Response:
+        return public_html(request, PAUSED_PAGE)
 
     @app.get("/skill.md")
     def skill_md() -> Response:
@@ -191,8 +191,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return Response(path.read_bytes(), media_type="text/markdown; charset=utf-8")
 
     @app.get("/watch", include_in_schema=False)
-    def watch() -> Response:
-        return public_html(STATIC)
+    def watch(request: Request) -> Response:
+        return public_html(request, STATIC)
 
     @app.get("/static/mascot.png", include_in_schema=False)
     def mascot_png() -> FileResponse:
