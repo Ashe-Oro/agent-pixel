@@ -48,6 +48,7 @@ from app.schedule import (
     SessionClock,
     artist_on_slice,
     configured_slice_count,
+    daily_paused,
     day_bounds,
     design_wait_seconds,
     is_solo_order,
@@ -2261,11 +2262,18 @@ class Store:
         return fields
 
     def routine_tick(self) -> dict[str, Any]:
-        """Start this morning's canvas if it is due, then report the same canvas the watch page shows."""
+        """Start this morning's canvas if it is due, then report the same canvas the watch page shows.
+
+        ``TILE_DAILY_PAUSED`` skips that new canvas and the wakes that would
+        announce it. A canvas already open still finishes and locks on its
+        own clock.
+        """
+        paused = daily_paused()
 
         def mutate() -> None:
             now = self.now()
-            self._start_scheduled_morning(now)
+            if not paused:
+                self._start_scheduled_morning(now)
             self._apply_design_timeout(now)
 
         self._run_write(mutate)
@@ -2274,28 +2282,41 @@ class Store:
             now = self.now()
             featured = self._default_feature(now)
             if featured is not None:
-                return self._tick_payload(featured, now)
-            phase, _ = position(now)
-            if phase == "before":
-                return {
-                    "ok": True,
-                    "phase": "before_open",
-                    "ny_now": now.astimezone(NY).isoformat(),
-                    "ny_label": label_clock(now),
-                    "hint": "Wait until 08:00 America/New_York, then tick again and post a design.",
-                    "day": None,
-                }
-            return {
-                "ok": True,
-                "phase": "locked",
-                "ny_now": now.astimezone(NY).isoformat(),
-                "ny_label": label_clock(now),
-                "slice_index": None,
-                "round_index": None,
-                "current_agent_id": None,
-                "hint": "The morning window has passed and no canvas is open.",
-                "day": None,
-            }
+                payload = self._tick_payload(featured, now)
+            else:
+                phase, _ = position(now)
+                if phase == "before":
+                    payload = {
+                        "ok": True,
+                        "phase": "before_open",
+                        "ny_now": now.astimezone(NY).isoformat(),
+                        "ny_label": label_clock(now),
+                        "hint": "Wait until 08:00 America/New_York, then tick again and post a design.",
+                        "day": None,
+                    }
+                elif paused:
+                    payload = {
+                        "ok": True,
+                        "phase": "paused",
+                        "ny_now": now.astimezone(NY).isoformat(),
+                        "ny_label": label_clock(now),
+                        "hint": "Daily canvases are paused. No new morning canvas will open.",
+                        "day": None,
+                    }
+                else:
+                    payload = {
+                        "ok": True,
+                        "phase": "locked",
+                        "ny_now": now.astimezone(NY).isoformat(),
+                        "ny_label": label_clock(now),
+                        "slice_index": None,
+                        "round_index": None,
+                        "current_agent_id": None,
+                        "hint": "The morning window has passed and no canvas is open.",
+                        "day": None,
+                    }
+            payload["paused"] = paused
+            return payload
 
     def cron_tick(self) -> dict[str, Any]:
         """Create today's canvas if the morning is open, then deliver due wakes.
@@ -2707,6 +2728,7 @@ class Store:
         with self.lock:
             self._refresh()
             state = self._watch_state(day_id)
+        state["daily_paused"] = daily_paused()
         self._dispatch_quietly()
         return state
 
